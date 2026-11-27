@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "macos": "react-native run-macos",
+    "macos:release": "([ -d macos/Pods ] && cmp -s macos/Podfile.lock macos/Pods/Manifest.lock || (cd macos && pod install)) && react-native run-macos --mode Release --no-packager",
     "start": "react-native start"
   },
   "dependencies": {

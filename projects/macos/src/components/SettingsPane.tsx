@@ -174,10 +174,23 @@ export function SettingsPane({
         setStatusMessage(null);
         setErrorText(discovery.message);
         return;
-      case "not_deployed":
+      case "not_deployed": {
+        setStatusMessage("Checking Worker status...");
+        const liveStatus = await fetchWorkerStatus(config.baseUrl);
+        if (destroyEpochRef.current !== epoch) {
+          return;
+        }
+        if (liveStatus.kind !== "offline") {
+          setStatusMessage(null);
+          setErrorText(
+            "Signed into a Cloudflare account that does not own this Worker.",
+          );
+          return;
+        }
         setStatusMessage(null);
         onOffboard();
         return;
+      }
       case "found": {
         const normalizedBaseUrl = config.baseUrl.trim().replace(/\/$/, "");
         const target = discovery.matches.find(

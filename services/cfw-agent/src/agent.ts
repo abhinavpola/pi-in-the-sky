@@ -80,6 +80,8 @@ export class PersonalAgent extends DurableObject<Env> {
         this.resolveApproval(approvalId, approved, note),
       onResumeTakeover: async (takeoverId, note) =>
         this.resumeTakeover(takeoverId, note),
+      listPendingApprovals: () => this.approvals.list("pending"),
+      listWaitingTakeovers: () => this.browser.listWaitingTakeovers(),
     },
   );
 

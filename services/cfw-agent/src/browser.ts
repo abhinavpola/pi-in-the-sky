@@ -79,6 +79,26 @@ export class BrowserStore {
     return this.getTakeover(input.id)!;
   }
 
+  #toTakeover(row: {
+    id: string;
+    task_id: string;
+    url: string;
+    live_view_url: string | null;
+    reason: string;
+    status: "waiting" | "resumed";
+    created_at: number;
+  }): BrowserTakeoverRecord {
+    return {
+      id: row.id,
+      taskId: row.task_id as unknown as TaskId,
+      url: row.url,
+      liveViewUrl: row.live_view_url,
+      reason: row.reason,
+      status: row.status,
+      createdAt: row.created_at,
+    };
+  }
+
   getTakeover(id: string): BrowserTakeoverRecord | undefined {
     const rows = this.#sql
       .exec<{
@@ -98,15 +118,24 @@ export class BrowserStore {
     if (!row) {
       return undefined;
     }
-    return {
-      id: row.id,
-      taskId: row.task_id as unknown as TaskId,
-      url: row.url,
-      liveViewUrl: row.live_view_url,
-      reason: row.reason,
-      status: row.status,
-      createdAt: row.created_at,
-    };
+    return this.#toTakeover(row);
+  }
+
+  listWaitingTakeovers(): BrowserTakeoverRecord[] {
+    const rows = this.#sql
+      .exec<{
+        id: string;
+        task_id: string;
+        url: string;
+        live_view_url: string | null;
+        reason: string;
+        status: "waiting" | "resumed";
+        created_at: number;
+      }>(
+        "SELECT id, task_id, url, live_view_url, reason, status, created_at FROM browser_takeovers WHERE status = 'waiting' ORDER BY created_at ASC",
+      )
+      .toArray();
+    return rows.map((row) => this.#toTakeover(row));
   }
 
   markResumed(id: string): void {

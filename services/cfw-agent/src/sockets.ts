@@ -100,6 +100,8 @@ type SocketCallbacks = {
     takeoverId: string,
     note?: string,
   ) => Promise<CommandResult>;
+  readonly listPendingApprovals: () => ApprovalRecord[];
+  readonly listWaitingTakeovers: () => BrowserTakeoverRecord[];
 };
 
 export class AgentSockets {
@@ -184,6 +186,12 @@ export class AgentSockets {
           description: tool.description,
         })),
     });
+    for (const approval of this.#callbacks.listPendingApprovals()) {
+      send(connection, { type: "approval_requested", approval });
+    }
+    for (const takeover of this.#callbacks.listWaitingTakeovers()) {
+      send(connection, { type: "takeover_requested", takeover });
+    }
   }
 
   async #watch(

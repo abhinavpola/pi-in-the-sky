@@ -94,13 +94,17 @@ export class AgentClient {
 
   updateConfig(config: ConnectionConfig): void {
     this.#config = config;
+    this.clearSession();
+    this.connect();
+  }
+
+  clearSession(): void {
     this.#messages = [];
     this.#activities = [];
     this.#handlers.onMessagesChange([]);
     this.#handlers.onActivitiesChange([]);
     this.#handlers.onReset();
     this.disconnect();
-    this.connect();
   }
 
   connect(): void {

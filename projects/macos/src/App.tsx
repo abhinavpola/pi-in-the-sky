@@ -140,7 +140,7 @@ export function App() {
     sessionEpochRef.current += 1;
     setErrorBanner(null);
     setShowDrawer(false);
-    client.disconnect();
+    client.clearSession();
     if (config.accessTeamDomain && config.accessClientId) {
       setConfig({
         baseUrl: config.baseUrl,
@@ -218,7 +218,8 @@ export function App() {
 
   return (
     <SafeAreaView style={styles.root}>
-      {viewMode === "onboarding" ? null : (
+      {viewMode === "onboarding" ||
+      config.authToken.trim().length === 0 ? null : (
         <View style={styles.toolbar}>
           <Pressable style={styles.brand} onPress={() => setViewMode("stream")}>
             <View

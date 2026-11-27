@@ -17,6 +17,7 @@ import {
 } from "react-native";
 
 import { signInWithCloudflareAccess } from "../native";
+import { THEME } from "../theme";
 
 type OnboardingStep = "connect" | "deploy" | "access_login";
 
@@ -37,12 +38,12 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
   const [errorText, setErrorText] = useState<string | null>(null);
 
   const verifyLiveWorker = async (candidateUrl: string) => {
-    setStatusMessage("Checking Worker liveness...");
+    setStatusMessage("Connecting...");
     const status = await fetchWorkerStatus(candidateUrl);
     switch (status.kind) {
       case "offline":
         setStatusMessage(null);
-        setErrorText(`Worker not reachable yet: ${status.reason}`);
+        setErrorText(status.reason);
         setStep("deploy");
         return;
       case "live_no_oauth":
@@ -56,7 +57,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
         setWorkerUrl(status.baseUrl);
         setTeamDomain(status.teamDomain);
         setClientId(status.clientId);
-        setStatusMessage("Worker is live and Cloudflare Access is ready.");
+        setStatusMessage(null);
         setStep("access_login");
         return;
       default: {
@@ -67,17 +68,15 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
 
   const handleContinue = async () => {
     if (!cfApiToken.trim() || !nearAiApiKey.trim()) {
-      setErrorText(
-        "Both your Cloudflare setup token and NEAR AI API key are required.",
-      );
+      setErrorText("Enter both keys to continue.");
       return;
     }
     setErrorText(null);
-    setStatusMessage("Discovering your Cloudflare account and Worker...");
+    setStatusMessage("Checking Cloudflare...");
     const discovery = await discoverCloudflareWorker(cfApiToken);
     switch (discovery.kind) {
       case "found": {
-        setStatusMessage("Uploading NEAR AI secret to your Worker...");
+        setStatusMessage("Configuring...");
         const provisioned = await provisionWorkerSecrets(
           cfApiToken,
           discovery.accountId,
@@ -85,7 +84,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
         );
         if (!provisioned.ok) {
           setStatusMessage(null);
-          setErrorText(`Secret provisioning failed: ${provisioned.error}`);
+          setErrorText(provisioned.error);
           return;
         }
         setCfApiToken("");
@@ -95,9 +94,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
         return;
       }
       case "not_deployed":
-        setStatusMessage(
-          "No pi-in-the-sky Worker found on your account yet. Deploy it in 1 click below.",
-        );
+        setStatusMessage(null);
         setStep("deploy");
         return;
       case "error":
@@ -113,9 +110,6 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
   const handleOpenDeploy = async () => {
     setErrorText(null);
     await Linking.openURL(DEPLOY_TO_CLOUDFLARE_URL);
-    setStatusMessage(
-      "Opened Deploy to Cloudflare in your browser. Once finished, click Continue.",
-    );
   };
 
   const handleAccessLogin = async () => {
@@ -140,87 +134,76 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
       case "connect":
         return (
           <View style={styles.card}>
-            <Text style={styles.stepTitle}>1. Connect Cloudflare</Text>
-            <Text style={styles.desc}>
-              Your account, Worker URL, and Access login are derived
-              automatically. Your setup token is discarded immediately after
-              provisioning.
-            </Text>
-            <Text style={styles.label}>Cloudflare Setup Token</Text>
-            <TextInput
-              style={styles.input}
-              value={cfApiToken}
-              onChangeText={setCfApiToken}
-              secureTextEntry
-              placeholder="Cloudflare API token"
-              placeholderTextColor="#64748b"
-            />
-            <Text style={styles.label}>NEAR AI API Key</Text>
-            <TextInput
-              style={styles.input}
-              value={nearAiApiKey}
-              onChangeText={setNearAiApiKey}
-              secureTextEntry
-              placeholder="sk-..."
-              placeholderTextColor="#64748b"
-            />
+            <View style={styles.field}>
+              <Text style={styles.label}>Cloudflare Token</Text>
+              <TextInput
+                style={styles.input}
+                value={cfApiToken}
+                onChangeText={setCfApiToken}
+                secureTextEntry
+                placeholder="Paste token"
+                placeholderTextColor={THEME.textTertiary}
+              />
+            </View>
+            <View style={styles.field}>
+              <Text style={styles.label}>NEAR AI Key</Text>
+              <TextInput
+                style={styles.input}
+                value={nearAiApiKey}
+                onChangeText={setNearAiApiKey}
+                secureTextEntry
+                placeholder="sk-..."
+                placeholderTextColor={THEME.textTertiary}
+              />
+            </View>
             <Pressable
               style={styles.primaryButton}
               onPress={() => {
                 void handleContinue();
               }}
             >
-              <Text style={styles.buttonText}>Continue</Text>
+              <Text style={styles.primaryButtonText}>Continue</Text>
             </Pressable>
           </View>
         );
       case "deploy":
         return (
           <View style={styles.card}>
-            <Text style={styles.stepTitle}>
-              2. 1-Click Deploy to Cloudflare
+            <Text style={styles.cardTitle}>Deploy to Cloudflare</Text>
+            <Text style={styles.cardBody}>
+              Finish deploying in your browser, then continue.
             </Text>
-            <Text style={styles.desc}>
-              Deploy your private pi-in-the-sky Worker to your Cloudflare
-              account, then continue to configure secrets and sign in.
-            </Text>
-            <View style={styles.row}>
-              <Pressable
-                style={styles.deployButton}
-                onPress={() => {
-                  void handleOpenDeploy();
-                }}
-              >
-                <Text style={styles.buttonText}>Deploy to Cloudflare</Text>
-              </Pressable>
-              <Pressable
-                style={styles.primaryButton}
-                onPress={() => {
-                  void handleContinue();
-                }}
-              >
-                <Text style={styles.buttonText}>Continue</Text>
-              </Pressable>
-            </View>
+            <Pressable
+              style={styles.primaryButton}
+              onPress={() => {
+                void handleOpenDeploy();
+              }}
+            >
+              <Text style={styles.primaryButtonText}>Deploy to Cloudflare</Text>
+            </Pressable>
+            <Pressable
+              style={styles.secondaryButton}
+              onPress={() => {
+                void handleContinue();
+              }}
+            >
+              <Text style={styles.secondaryButtonText}>Continue</Text>
+            </Pressable>
           </View>
         );
       case "access_login":
         return (
           <View style={styles.card}>
-            <Text style={styles.stepTitle}>
-              3. Sign in with Cloudflare Access
-            </Text>
-            <Text style={styles.desc}>
-              Worker: {workerUrl} ({teamDomain})
-            </Text>
+            <Text style={styles.cardTitle}>Sign In</Text>
+            <Text style={styles.cardBody}>{teamDomain}</Text>
             <Pressable
-              style={styles.oauthButton}
+              style={styles.primaryButton}
               onPress={() => {
                 void handleAccessLogin();
               }}
             >
-              <Text style={styles.buttonText}>
-                Sign in with Cloudflare Access
+              <Text style={styles.primaryButtonText}>
+                Sign in with Cloudflare
               </Text>
             </Pressable>
           </View>
@@ -234,26 +217,28 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Pi in the Sky</Text>
-      <Text style={styles.subtitle}>
-        Private personal AI running durably on your Cloudflare account.
-      </Text>
+      <View style={styles.frame}>
+        <View style={styles.header}>
+          <Text style={styles.title}>Pi in the Sky</Text>
+          <Text style={styles.subtitle}>Set up your personal assistant</Text>
+        </View>
 
-      {renderStep(step)}
+        {renderStep(step)}
 
-      {statusMessage ? (
-        <Text style={styles.status}>{statusMessage}</Text>
-      ) : null}
-      {errorText ? <Text style={styles.error}>{errorText}</Text> : null}
+        {statusMessage ? (
+          <Text style={styles.status}>{statusMessage}</Text>
+        ) : null}
+        {errorText ? <Text style={styles.error}>{errorText}</Text> : null}
 
-      <Pressable
-        style={styles.localLink}
-        onPress={() => {
-          void verifyLiveWorker(LOCAL_DEV_URL);
-        }}
-      >
-        <Text style={styles.localText}>Use local dev Worker</Text>
-      </Pressable>
+        <Pressable
+          style={styles.localLink}
+          onPress={() => {
+            void verifyLiveWorker(LOCAL_DEV_URL);
+          }}
+        >
+          <Text style={styles.localText}>Use local server</Text>
+        </Pressable>
+      </View>
     </View>
   );
 }
@@ -261,59 +246,105 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#0f172a",
-    padding: 24,
+    backgroundColor: THEME.canvas,
+    alignItems: "center",
     justifyContent: "center",
-    gap: 12,
+    padding: 32,
   },
-  title: { color: "#f8fafc", fontSize: 24, fontWeight: "700" },
-  subtitle: { color: "#94a3b8", fontSize: 13, marginBottom: 8 },
-  card: {
-    backgroundColor: "#1e293b",
-    borderRadius: 12,
-    padding: 16,
-    gap: 10,
-    borderWidth: 1,
-    borderColor: "#334155",
+  frame: {
+    width: "100%",
+    maxWidth: 380,
+    gap: 16,
   },
-  stepTitle: { color: "#f8fafc", fontSize: 16, fontWeight: "700" },
-  desc: { color: "#cbd5e1", fontSize: 12 },
-  label: { color: "#cbd5e1", fontSize: 12, fontWeight: "600", marginTop: 4 },
-  input: {
-    backgroundColor: "#0f172a",
-    color: "#f8fafc",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+  header: {
+    alignItems: "center",
+    gap: 4,
+    marginBottom: 4,
+  },
+  title: {
+    color: THEME.textPrimary,
+    fontSize: 26,
+    fontWeight: "600",
+    letterSpacing: -0.5,
+  },
+  subtitle: {
+    color: THEME.textSecondary,
     fontSize: 13,
   },
-  row: { flexDirection: "row", gap: 8, marginTop: 6 },
+  card: {
+    backgroundColor: THEME.surface,
+    borderRadius: 14,
+    padding: 20,
+    gap: 14,
+    borderWidth: 1,
+    borderColor: THEME.border,
+  },
+  cardTitle: {
+    color: THEME.textPrimary,
+    fontSize: 16,
+    fontWeight: "600",
+    letterSpacing: -0.2,
+  },
+  cardBody: {
+    color: THEME.textSecondary,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  field: {
+    gap: 6,
+  },
+  label: {
+    color: THEME.textSecondary,
+    fontSize: 12,
+    fontWeight: "500",
+  },
+  input: {
+    backgroundColor: THEME.inputBg,
+    color: THEME.textPrimary,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    fontSize: 13,
+  },
   primaryButton: {
-    backgroundColor: "#2563eb",
-    paddingHorizontal: 16,
+    backgroundColor: THEME.blue,
     paddingVertical: 10,
     borderRadius: 8,
-    alignSelf: "flex-start",
+    alignItems: "center",
     marginTop: 4,
   },
-  deployButton: {
-    backgroundColor: "#ea580c",
-    paddingHorizontal: 16,
+  primaryButtonText: {
+    color: THEME.white,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  secondaryButton: {
+    backgroundColor: THEME.inputBg,
     paddingVertical: 10,
     borderRadius: 8,
-    alignSelf: "flex-start",
+    alignItems: "center",
+  },
+  secondaryButtonText: {
+    color: THEME.textPrimary,
+    fontSize: 13,
+    fontWeight: "500",
+  },
+  status: {
+    color: THEME.textSecondary,
+    fontSize: 12,
+    textAlign: "center",
+  },
+  error: {
+    color: THEME.red,
+    fontSize: 12,
+    textAlign: "center",
+  },
+  localLink: {
+    alignSelf: "center",
     marginTop: 4,
   },
-  oauthButton: {
-    backgroundColor: "#0f766e",
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignSelf: "flex-start",
+  localText: {
+    color: THEME.textTertiary,
+    fontSize: 12,
   },
-  buttonText: { color: "#ffffff", fontSize: 13, fontWeight: "600" },
-  status: { color: "#93c5fd", fontSize: 12 },
-  error: { color: "#fca5a5", fontSize: 12 },
-  localLink: { alignSelf: "flex-start", marginTop: 8 },
-  localText: { color: "#64748b", fontSize: 12 },
 });

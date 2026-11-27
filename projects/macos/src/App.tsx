@@ -8,7 +8,7 @@ import type {
   ChatMessage,
   TakeoverRecord,
 } from "@pi-in-the-sky/client/protocol";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
 
 import { MemoryPane } from "./components/MemoryPane";
@@ -20,6 +20,7 @@ import {
   loadStoredConnectionConfig,
   saveStoredConnectionConfig,
 } from "./native";
+import { THEME } from "./theme";
 
 type ViewMode = "onboarding" | "stream" | "memory" | "settings";
 
@@ -27,6 +28,21 @@ const DEFAULT_CONFIG: ConnectionConfig = {
   baseUrl: "http://127.0.0.1:8787",
   authToken: "",
 };
+
+function connectionDotColor(state: ConnectionState): string {
+  switch (state) {
+    case "connected":
+      return THEME.green;
+    case "connecting":
+      return THEME.orange;
+    case "disconnected":
+      return THEME.textTertiary;
+    default: {
+      state satisfies never;
+      return THEME.textTertiary;
+    }
+  }
+}
 
 export function App() {
   const [viewMode, setViewMode] = useState<ViewMode>("onboarding");
@@ -38,6 +54,7 @@ export function App() {
   const [activities, setActivities] = useState<ActivityRecord[]>([]);
   const [activeTakeovers, setActiveTakeovers] = useState<TakeoverRecord[]>([]);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const sessionEpochRef = useRef(0);
 
   const client = useMemo(
     () =>
@@ -62,24 +79,20 @@ export function App() {
 
   useEffect(() => {
     let active = true;
+    const epoch = sessionEpochRef.current;
     void loadStoredConnectionConfig().then((result) => {
-      if (!active) {
+      if (!active || sessionEpochRef.current !== epoch) {
         return;
       }
       if (!result.ok) {
         setErrorBanner(result.error);
-        client.connect();
         return;
       }
-      if (result.value) {
+      if (result.value && result.value.authToken.trim().length > 0) {
         setConfig(result.value);
         client.updateConfig(result.value);
-        if (result.value.authToken.trim().length > 0) {
-          setViewMode("stream");
-        }
-        return;
+        setViewMode("stream");
       }
-      client.connect();
     });
     return () => {
       active = false;
@@ -87,12 +100,25 @@ export function App() {
     };
   }, [client]);
 
-  const applyAndPersistConfig = (next: ConnectionConfig) => {
+  const applyAndPersistConfig = (
+    next: ConnectionConfig,
+    expectedEpoch?: number,
+  ) => {
+    if (
+      expectedEpoch !== undefined &&
+      sessionEpochRef.current !== expectedEpoch
+    ) {
+      return;
+    }
     setConfig(next);
     setErrorBanner(null);
     client.updateConfig(next);
     setViewMode("stream");
+    const epoch = sessionEpochRef.current;
     void saveStoredConnectionConfig(next).then((saved) => {
+      if (sessionEpochRef.current !== epoch) {
+        return;
+      }
       if (!saved.ok) {
         setErrorBanner(saved.error);
       }
@@ -100,9 +126,11 @@ export function App() {
   };
 
   const handleSignOut = () => {
+    sessionEpochRef.current += 1;
     setConfig(DEFAULT_CONFIG);
     setErrorBanner(null);
-    client.updateConfig(DEFAULT_CONFIG);
+    setShowDrawer(false);
+    client.disconnect();
     setViewMode("onboarding");
     void clearStoredConnectionConfig().then((cleared) => {
       if (!cleared.ok) {
@@ -116,15 +144,6 @@ export function App() {
     setActiveTakeovers((prev) => prev.filter((item) => item.id !== id));
   };
 
-  const handleCompact = () => {
-    const recent = messages
-      .slice(-6)
-      .map((item) => `${item.role}: ${item.text}`)
-      .join(" | ");
-    const summary = recent || "Compacted stream checkpoint.";
-    client.compactThread(summary);
-  };
-
   const runningCount = activities.filter(
     (item) => item.status === "running" || item.status === "waiting_input",
   ).length;
@@ -132,7 +151,9 @@ export function App() {
   const renderContent = (mode: ViewMode) => {
     switch (mode) {
       case "onboarding":
-        return <OnboardingView onComplete={applyAndPersistConfig} />;
+        return (
+          <OnboardingView onComplete={(next) => applyAndPersistConfig(next)} />
+        );
       case "stream":
         return (
           <StreamView
@@ -151,7 +172,6 @@ export function App() {
             onToggleActivity={(activityId, collapsed) => {
               client.toggleActivity(activityId, collapsed);
             }}
-            onCompact={handleCompact}
             onAbort={() => client.abort()}
             onResumeTakeover={handleResumeTakeover}
           />
@@ -163,6 +183,7 @@ export function App() {
           <SettingsPane
             config={config}
             connectionState={connectionState}
+            getSessionEpoch={() => sessionEpochRef.current}
             onSave={applyAndPersistConfig}
             onSignOut={handleSignOut}
           />
@@ -176,93 +197,143 @@ export function App() {
 
   return (
     <SafeAreaView style={styles.root}>
-      <View style={styles.header}>
-        <View style={styles.headerLeft}>
-          <Pressable onPress={() => setViewMode("stream")}>
+      {viewMode === "onboarding" ? null : (
+        <View style={styles.toolbar}>
+          <Pressable style={styles.brand} onPress={() => setViewMode("stream")}>
+            <View
+              style={[
+                styles.statusDot,
+                { backgroundColor: connectionDotColor(connectionState) },
+              ]}
+            />
             <Text style={styles.title}>Pi in the Sky</Text>
           </Pressable>
-          <Text style={styles.badge}>{connectionState}</Text>
-        </View>
-        <View style={styles.headerActions}>
+
+          <View style={styles.segmented}>
+            {(["stream", "memory", "settings"] as const).map((tab) => {
+              const active = viewMode === tab;
+              const label =
+                tab === "stream"
+                  ? "Chat"
+                  : tab === "memory"
+                    ? "Memory"
+                    : "Settings";
+              return (
+                <Pressable
+                  key={tab}
+                  style={[styles.segment, active && styles.segmentActive]}
+                  onPress={() => setViewMode(tab)}
+                >
+                  <Text
+                    style={[
+                      styles.segmentText,
+                      active && styles.segmentTextActive,
+                    ]}
+                  >
+                    {label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
           <Pressable
-            style={[styles.pill, showDrawer && styles.pillActive]}
+            style={[styles.tasksButton, showDrawer && styles.tasksButtonActive]}
             onPress={() => {
               setViewMode("stream");
               setShowDrawer((prev) => !prev);
             }}
           >
-            <Text style={styles.pillText}>
-              Activity{runningCount > 0 ? ` (${runningCount})` : ""}
+            <Text
+              style={[styles.tasksText, showDrawer && styles.tasksTextActive]}
+            >
+              Tasks{runningCount > 0 ? ` · ${runningCount}` : ""}
             </Text>
           </Pressable>
-          <Pressable
-            style={[styles.pill, viewMode === "memory" && styles.pillActive]}
-            onPress={() =>
-              setViewMode((prev) => (prev === "memory" ? "stream" : "memory"))
-            }
-          >
-            <Text style={styles.pillText}>Memory</Text>
-          </Pressable>
-          <Pressable
-            style={[
-              styles.pill,
-              viewMode === "onboarding" && styles.pillActive,
-            ]}
-            onPress={() =>
-              setViewMode((prev) =>
-                prev === "onboarding" ? "stream" : "onboarding",
-              )
-            }
-          >
-            <Text style={styles.pillText}>Setup</Text>
-          </Pressable>
-          <Pressable
-            style={[styles.pill, viewMode === "settings" && styles.pillActive]}
-            onPress={() =>
-              setViewMode((prev) =>
-                prev === "settings" ? "stream" : "settings",
-              )
-            }
-          >
-            <Text style={styles.pillText}>Settings</Text>
-          </Pressable>
         </View>
-      </View>
+      )}
+
       {errorBanner ? (
         <View style={styles.errorBar}>
           <Text style={styles.errorText}>{errorBanner}</Text>
         </View>
       ) : null}
+
       <View style={styles.main}>{renderContent(viewMode)}</View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#0b1120" },
-  header: {
+  root: { flex: 1, backgroundColor: THEME.canvas },
+  toolbar: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 16,
+    paddingHorizontal: 20,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: "#1e293b",
-    backgroundColor: "#0b1120",
+    borderBottomColor: THEME.border,
+    backgroundColor: THEME.toolbar,
   },
-  headerLeft: { flexDirection: "row", alignItems: "center", gap: 10 },
-  headerActions: { flexDirection: "row", gap: 8 },
-  title: { color: "#f8fafc", fontSize: 15, fontWeight: "700" },
-  badge: { color: "#93c5fd", fontSize: 12 },
-  pill: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+  brand: { flexDirection: "row", alignItems: "center", gap: 8, minWidth: 120 },
+  statusDot: { width: 7, height: 7, borderRadius: 4 },
+  title: {
+    color: THEME.textPrimary,
+    fontSize: 13,
+    fontWeight: "600",
+    letterSpacing: -0.1,
+  },
+  segmented: {
+    flexDirection: "row",
+    backgroundColor: THEME.segmentBg,
     borderRadius: 8,
-    backgroundColor: "#1e293b",
+    padding: 2,
+    gap: 2,
   },
-  pillActive: { backgroundColor: "#1d4ed8" },
-  pillText: { color: "#f8fafc", fontSize: 12, fontWeight: "600" },
+  segment: {
+    paddingHorizontal: 14,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  segmentActive: {
+    backgroundColor: THEME.surface,
+  },
+  segmentText: {
+    color: THEME.textSecondary,
+    fontSize: 12,
+    fontWeight: "500",
+  },
+  segmentTextActive: {
+    color: THEME.textPrimary,
+    fontWeight: "600",
+  },
+  tasksButton: {
+    minWidth: 72,
+    alignItems: "flex-end",
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 7,
+  },
+  tasksButtonActive: {
+    backgroundColor: THEME.blueTint,
+  },
+  tasksText: {
+    color: THEME.textSecondary,
+    fontSize: 12,
+    fontWeight: "500",
+  },
+  tasksTextActive: {
+    color: THEME.blue,
+    fontWeight: "600",
+  },
   main: { flex: 1 },
-  errorBar: { backgroundColor: "#7f1d1d", padding: 8 },
-  errorText: { color: "#fecaca", fontSize: 12 },
+  errorBar: {
+    backgroundColor: THEME.redTint,
+    borderBottomWidth: 1,
+    borderBottomColor: "#FFD6D3",
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+  },
+  errorText: { color: THEME.red, fontSize: 12, fontWeight: "500" },
 });

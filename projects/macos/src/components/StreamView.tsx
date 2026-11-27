@@ -14,6 +14,8 @@ import {
   View,
 } from "react-native";
 
+import { THEME } from "../theme";
+
 type StreamViewProps = {
   readonly messages: readonly ChatMessage[];
   readonly activities: readonly ActivityRecord[];
@@ -25,26 +27,44 @@ type StreamViewProps = {
     instruction: string,
   ) => boolean;
   readonly onToggleActivity: (activityId: string, collapsed: boolean) => void;
-  readonly onCompact: () => void;
   readonly onAbort: () => void;
   readonly onResumeTakeover: (id: string) => void;
 };
 
-function statusBadgeLabel(status: ActivityRecord["status"]): string {
+function activityDotColor(status: ActivityRecord["status"]): string {
   switch (status) {
     case "running":
-      return "RUNNING";
+      return THEME.blue;
     case "waiting_input":
-      return "NEEDS INPUT";
+      return THEME.orange;
     case "completed":
-      return "DONE";
+      return THEME.green;
     case "failed":
-      return "FAILED";
+      return THEME.red;
     case "cancelled":
-      return "CANCELLED";
+      return THEME.textTertiary;
     default: {
       status satisfies never;
-      return "UNKNOWN";
+      return THEME.textTertiary;
+    }
+  }
+}
+
+function activityStatusLabel(status: ActivityRecord["status"]): string {
+  switch (status) {
+    case "running":
+      return "Running";
+    case "waiting_input":
+      return "Needs input";
+    case "completed":
+      return "Done";
+    case "failed":
+      return "Failed";
+    case "cancelled":
+      return "Cancelled";
+    default: {
+      status satisfies never;
+      return "";
     }
   }
 }
@@ -57,7 +77,6 @@ export function StreamView({
   onSend,
   onSteerActivity,
   onToggleActivity,
-  onCompact,
   onAbort,
   onResumeTakeover,
 }: StreamViewProps) {
@@ -89,135 +108,153 @@ export function StreamView({
       <View style={styles.streamColumn}>
         <ScrollView
           style={styles.transcript}
-          contentContainerStyle={styles.list}
+          contentContainerStyle={styles.listContent}
         >
-          {activities.length > 0 ? (
-            <View style={styles.activityStrip}>
-              {activities.map((activity) => (
-                <View key={activity.id} style={styles.activityCard}>
-                  <View style={styles.cardHeader}>
-                    <Pressable
-                      style={styles.cardTitleRow}
-                      onPress={() =>
-                        onToggleActivity(activity.id, !activity.collapsed)
-                      }
-                    >
-                      <Text style={styles.statusPill}>
-                        {statusBadgeLabel(activity.status)}
+          <View style={styles.readingColumn}>
+            {activities.length > 0 ? (
+              <View style={styles.activityStrip}>
+                {activities.map((activity) => (
+                  <View key={activity.id} style={styles.activityCard}>
+                    <View style={styles.cardHeader}>
+                      <Pressable
+                        style={styles.cardTitleRow}
+                        onPress={() =>
+                          onToggleActivity(activity.id, !activity.collapsed)
+                        }
+                      >
+                        <View
+                          style={[
+                            styles.dot,
+                            {
+                              backgroundColor: activityDotColor(
+                                activity.status,
+                              ),
+                            },
+                          ]}
+                        />
+                        <Text style={styles.cardTitle}>{activity.title}</Text>
+                        <Text style={styles.subtle}>
+                          {activityStatusLabel(activity.status)}
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        style={styles.replyChip}
+                        onPress={() => setTargetActivityId(activity.id)}
+                      >
+                        <Text style={styles.replyChipText}>Reply</Text>
+                      </Pressable>
+                    </View>
+                    {activity.collapsed ? null : (
+                      <Text style={styles.activityBody}>
+                        {activity.summary}
                       </Text>
-                      <Text style={styles.cardTitle}>{activity.title}</Text>
-                      <Text style={styles.subtle}>
-                        {activity.collapsed ? "Show" : "Collapse"}
-                      </Text>
-                    </Pressable>
-                    <Pressable
-                      style={styles.replyChip}
-                      onPress={() => setTargetActivityId(activity.id)}
-                    >
-                      <Text style={styles.chipText}>Reply</Text>
-                    </Pressable>
+                    )}
                   </View>
-                  {activity.collapsed ? null : (
-                    <Text style={styles.body}>{activity.summary}</Text>
-                  )}
-                </View>
-              ))}
-            </View>
-          ) : null}
-
-          {messages.length === 0 ? (
-            <Text style={styles.empty}>
-              Talk to your agent directly. Multi-step work spins up as
-              collapsible Activity cards while this stream stays open.
-            </Text>
-          ) : (
-            messages.map((message) => (
-              <View
-                key={message.id}
-                style={[
-                  styles.bubble,
-                  message.role === "user"
-                    ? styles.userBubble
-                    : styles.assistantBubble,
-                ]}
-              >
-                <Text style={styles.role}>{message.role.toUpperCase()}</Text>
-                <Text style={styles.body}>{message.text}</Text>
+                ))}
               </View>
-            ))
-          )}
+            ) : null}
 
-          {activeTakeovers.map((takeover) => (
-            <View key={takeover.id} style={styles.takeoverCard}>
-              <Text style={styles.takeoverTitle}>Browser Takeover Needed</Text>
-              <Text style={styles.body}>{takeover.reason}</Text>
-              <Text style={styles.subtle}>{takeover.url}</Text>
-              <View style={styles.row}>
-                {takeover.liveViewUrl ? (
-                  <Pressable
-                    style={styles.secondaryButton}
-                    onPress={() => {
-                      if (takeover.liveViewUrl) {
-                        void Linking.openURL(takeover.liveViewUrl);
-                      }
-                    }}
+            {messages.length === 0 ? (
+              <View style={styles.emptyWrap}>
+                <Text style={styles.emptyTitle}>What can I help with?</Text>
+              </View>
+            ) : (
+              messages.map((message) => {
+                const isUser = message.role === "user";
+                return (
+                  <View
+                    key={message.id}
+                    style={[
+                      styles.bubble,
+                      isUser ? styles.userBubble : styles.assistantBubble,
+                    ]}
                   >
-                    <Text style={styles.buttonText}>Open Live View</Text>
+                    <Text
+                      style={[
+                        styles.body,
+                        isUser ? styles.userBody : styles.assistantBody,
+                      ]}
+                    >
+                      {message.text}
+                    </Text>
+                  </View>
+                );
+              })
+            )}
+
+            {activeTakeovers.map((takeover) => (
+              <View key={takeover.id} style={styles.takeoverCard}>
+                <Text style={styles.takeoverTitle}>Action needed</Text>
+                <Text style={styles.assistantBody}>{takeover.reason}</Text>
+                <Text style={styles.subtle}>{takeover.url}</Text>
+                <View style={styles.row}>
+                  {takeover.liveViewUrl ? (
+                    <Pressable
+                      style={styles.secondaryButton}
+                      onPress={() => {
+                        if (takeover.liveViewUrl) {
+                          void Linking.openURL(takeover.liveViewUrl);
+                        }
+                      }}
+                    >
+                      <Text style={styles.secondaryButtonText}>Open</Text>
+                    </Pressable>
+                  ) : null}
+                  <Pressable
+                    style={styles.primaryButton}
+                    onPress={() => onResumeTakeover(takeover.id)}
+                  >
+                    <Text style={styles.primaryButtonText}>Done</Text>
                   </Pressable>
-                ) : null}
-                <Pressable
-                  style={styles.resumeButton}
-                  onPress={() => onResumeTakeover(takeover.id)}
-                >
-                  <Text style={styles.buttonText}>Resume Agent</Text>
-                </Pressable>
+                </View>
               </View>
-            </View>
-          ))}
+            ))}
+          </View>
         </ScrollView>
 
-        {targetActivity ? (
-          <View style={styles.replyBanner}>
-            <Text style={styles.replyLabel}>
-              Replying to activity: {targetActivity.title}
-            </Text>
-            <Pressable onPress={() => setTargetActivityId(null)}>
-              <Text style={styles.clearLink}>Clear</Text>
-            </Pressable>
-          </View>
-        ) : null}
+        <View style={styles.composerWrap}>
+          <View style={styles.composerInner}>
+            {targetActivity ? (
+              <View style={styles.replyBanner}>
+                <Text style={styles.replyLabel}>
+                  Replying to {targetActivity.title}
+                </Text>
+                <Pressable onPress={() => setTargetActivityId(null)}>
+                  <Text style={styles.clearLink}>Cancel</Text>
+                </Pressable>
+              </View>
+            ) : null}
 
-        <View style={styles.composer}>
-          <TextInput
-            style={styles.input}
-            value={draft}
-            onChangeText={setDraft}
-            placeholder={
-              targetActivity
-                ? `Steer "${targetActivity.title}"...`
-                : "Message your agent..."
-            }
-            placeholderTextColor="#6b7280"
-            onSubmitEditing={handleSend}
-          />
-          <Pressable style={styles.sendButton} onPress={handleSend}>
-            <Text style={styles.buttonText}>Send</Text>
-          </Pressable>
-          <Pressable style={styles.secondaryButton} onPress={onCompact}>
-            <Text style={styles.buttonText}>Compact</Text>
-          </Pressable>
-          <Pressable style={styles.stopButton} onPress={onAbort}>
-            <Text style={styles.buttonText}>Stop</Text>
-          </Pressable>
+            <View style={styles.composer}>
+              <TextInput
+                style={styles.input}
+                value={draft}
+                onChangeText={setDraft}
+                placeholder={
+                  targetActivity
+                    ? `Reply to ${targetActivity.title}`
+                    : "Message"
+                }
+                placeholderTextColor={THEME.textTertiary}
+                onSubmitEditing={handleSend}
+              />
+              <Pressable style={styles.stopButton} onPress={onAbort}>
+                <Text style={styles.stopButtonText}>Stop</Text>
+              </Pressable>
+              <Pressable style={styles.sendButton} onPress={handleSend}>
+                <Text style={styles.sendButtonText}>Send</Text>
+              </Pressable>
+            </View>
+          </View>
         </View>
       </View>
 
       {showDrawer ? (
         <View style={styles.drawer}>
-          <Text style={styles.drawerHeading}>Activities</Text>
+          <Text style={styles.drawerHeading}>Tasks</Text>
           <ScrollView contentContainerStyle={styles.drawerList}>
             {activities.length === 0 ? (
-              <Text style={styles.subtle}>No active or past activities.</Text>
+              <Text style={styles.subtle}>No tasks yet</Text>
             ) : (
               activities.map((activity) => (
                 <Pressable
@@ -225,10 +262,15 @@ export function StreamView({
                   style={styles.drawerItem}
                   onPress={() => setTargetActivityId(activity.id)}
                 >
-                  <Text style={styles.statusPill}>
-                    {statusBadgeLabel(activity.status)}
-                  </Text>
-                  <Text style={styles.cardTitle}>{activity.title}</Text>
+                  <View style={styles.cardTitleRow}>
+                    <View
+                      style={[
+                        styles.dot,
+                        { backgroundColor: activityDotColor(activity.status) },
+                      ]}
+                    />
+                    <Text style={styles.cardTitle}>{activity.title}</Text>
+                  </View>
                   <Text style={styles.subtle}>{activity.summary}</Text>
                 </Pressable>
               ))
@@ -241,17 +283,41 @@ export function StreamView({
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, flexDirection: "row", backgroundColor: "#0f172a" },
+  root: { flex: 1, flexDirection: "row", backgroundColor: THEME.canvas },
   streamColumn: { flex: 1 },
   transcript: { flex: 1 },
-  list: { padding: 16, gap: 12 },
-  activityStrip: { gap: 8 },
+  listContent: {
+    flexGrow: 1,
+    paddingHorizontal: 24,
+    paddingVertical: 24,
+    alignItems: "center",
+  },
+  readingColumn: {
+    width: "100%",
+    maxWidth: 720,
+    flexGrow: 1,
+    gap: 12,
+  },
+  emptyWrap: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 120,
+  },
+  emptyTitle: {
+    color: THEME.textTertiary,
+    fontSize: 18,
+    fontWeight: "500",
+    letterSpacing: -0.2,
+  },
+  activityStrip: { gap: 8, marginBottom: 4 },
   activityCard: {
-    padding: 12,
-    borderRadius: 10,
-    backgroundColor: "#172033",
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: THEME.surface,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: THEME.border,
     gap: 6,
   },
   cardHeader: {
@@ -261,109 +327,148 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   cardTitleRow: {
-    flex: 1,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
+    flex: 1,
   },
-  statusPill: {
-    color: "#38bdf8",
-    fontSize: 10,
-    fontWeight: "700",
-  },
-  cardTitle: { color: "#f8fafc", fontSize: 13, fontWeight: "700" },
+  dot: { width: 7, height: 7, borderRadius: 4 },
+  cardTitle: { color: THEME.textPrimary, fontSize: 13, fontWeight: "600" },
+  activityBody: { color: THEME.textSecondary, fontSize: 13, lineHeight: 19 },
   replyChip: {
-    backgroundColor: "#1e3a8a",
     paddingHorizontal: 10,
     paddingVertical: 4,
-    borderRadius: 6,
+    borderRadius: 999,
+    backgroundColor: THEME.inputBg,
   },
-  chipText: { color: "#dbeafe", fontSize: 11, fontWeight: "600" },
-  empty: { color: "#94a3b8", fontSize: 14, marginTop: 24 },
-  bubble: { padding: 12, borderRadius: 10, maxWidth: "85%" },
-  userBubble: { alignSelf: "flex-end", backgroundColor: "#1d4ed8" },
-  assistantBubble: { alignSelf: "flex-start", backgroundColor: "#1e293b" },
-  role: { color: "#cbd5e1", fontSize: 10, fontWeight: "700", marginBottom: 4 },
-  body: { color: "#f8fafc", fontSize: 14, lineHeight: 20 },
-  subtle: { color: "#94a3b8", fontSize: 12 },
-  takeoverCard: {
-    padding: 14,
-    borderRadius: 10,
-    backgroundColor: "#1e293b",
+  replyChipText: { color: THEME.textPrimary, fontSize: 11, fontWeight: "500" },
+  bubble: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 16,
+    maxWidth: "82%",
+  },
+  userBubble: {
+    alignSelf: "flex-end",
+    backgroundColor: THEME.blue,
+  },
+  assistantBubble: {
+    alignSelf: "flex-start",
+    backgroundColor: THEME.surface,
     borderWidth: 1,
-    borderColor: "#f59e0b",
-    gap: 6,
+    borderColor: THEME.border,
   },
-  takeoverTitle: { color: "#fbbf24", fontSize: 13, fontWeight: "700" },
-  row: { flexDirection: "row", gap: 8, marginTop: 8 },
+  body: { fontSize: 14, lineHeight: 20 },
+  userBody: { color: THEME.white },
+  assistantBody: { color: THEME.textPrimary },
+  subtle: { color: THEME.textSecondary, fontSize: 12 },
+  takeoverCard: {
+    padding: 16,
+    borderRadius: 12,
+    backgroundColor: THEME.surface,
+    borderWidth: 1,
+    borderColor: THEME.orange,
+    gap: 8,
+  },
+  takeoverTitle: { color: THEME.textPrimary, fontSize: 14, fontWeight: "600" },
+  row: { flexDirection: "row", gap: 8, marginTop: 4 },
+  primaryButton: {
+    backgroundColor: THEME.blue,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 8,
+  },
+  primaryButtonText: { color: THEME.white, fontSize: 12, fontWeight: "600" },
+  secondaryButton: {
+    backgroundColor: THEME.inputBg,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 8,
+  },
+  secondaryButtonText: {
+    color: THEME.textPrimary,
+    fontSize: 12,
+    fontWeight: "500",
+  },
+  composerWrap: {
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderTopWidth: 1,
+    borderTopColor: THEME.border,
+    backgroundColor: THEME.toolbar,
+    alignItems: "center",
+  },
+  composerInner: {
+    width: "100%",
+    maxWidth: 720,
+    gap: 8,
+  },
   replyBanner: {
     flexDirection: "row",
     justifyContent: "space-between",
-    paddingHorizontal: 14,
+    alignItems: "center",
+    paddingHorizontal: 12,
     paddingVertical: 6,
-    backgroundColor: "#172554",
+    borderRadius: 8,
+    backgroundColor: THEME.blueTint,
   },
-  replyLabel: { color: "#bfdbfe", fontSize: 12, fontWeight: "600" },
-  clearLink: { color: "#93c5fd", fontSize: 12, fontWeight: "700" },
+  replyLabel: { color: THEME.blue, fontSize: 12, fontWeight: "500" },
+  clearLink: { color: THEME.textSecondary, fontSize: 12, fontWeight: "500" },
   composer: {
     flexDirection: "row",
-    padding: 12,
+    alignItems: "center",
     gap: 8,
-    borderTopWidth: 1,
-    borderTopColor: "#1e293b",
-    backgroundColor: "#0b1120",
+    backgroundColor: THEME.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: THEME.borderStrong,
+    paddingLeft: 14,
+    paddingRight: 6,
+    paddingVertical: 6,
   },
   input: {
     flex: 1,
-    backgroundColor: "#1e293b",
-    color: "#f8fafc",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    color: THEME.textPrimary,
     fontSize: 14,
+    paddingVertical: 4,
   },
   sendButton: {
-    backgroundColor: "#2563eb",
+    backgroundColor: THEME.blue,
     paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 8,
-    justifyContent: "center",
-  },
-  resumeButton: {
-    backgroundColor: "#16a34a",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingVertical: 7,
     borderRadius: 8,
   },
+  sendButtonText: { color: THEME.white, fontSize: 13, fontWeight: "600" },
   stopButton: {
-    backgroundColor: "#dc2626",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
     borderRadius: 8,
-    justifyContent: "center",
   },
-  secondaryButton: {
-    backgroundColor: "#475569",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    justifyContent: "center",
+  stopButtonText: {
+    color: THEME.textSecondary,
+    fontSize: 12,
+    fontWeight: "500",
   },
-  buttonText: { color: "#ffffff", fontSize: 13, fontWeight: "600" },
   drawer: {
-    width: 260,
+    width: 280,
     borderLeftWidth: 1,
-    borderLeftColor: "#1e293b",
-    backgroundColor: "#0b1120",
-    padding: 14,
-    gap: 10,
+    borderLeftColor: THEME.border,
+    backgroundColor: THEME.toolbar,
+    padding: 16,
+    gap: 12,
   },
-  drawerHeading: { color: "#f8fafc", fontSize: 14, fontWeight: "700" },
-  drawerList: { gap: 10 },
+  drawerHeading: {
+    color: THEME.textPrimary,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  drawerList: { gap: 8 },
   drawerItem: {
-    padding: 10,
-    borderRadius: 8,
-    backgroundColor: "#172033",
+    padding: 12,
+    borderRadius: 10,
+    backgroundColor: THEME.surface,
+    borderWidth: 1,
+    borderColor: THEME.border,
     gap: 4,
   },
 });

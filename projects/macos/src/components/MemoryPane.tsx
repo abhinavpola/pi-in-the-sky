@@ -10,6 +10,8 @@ import {
   View,
 } from "react-native";
 
+import { THEME } from "../theme";
+
 type MemoryPaneProps = {
   readonly client: AgentClient;
 };
@@ -21,7 +23,7 @@ export function MemoryPane({ client }: MemoryPaneProps) {
   const [profileValue, setProfileValue] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [noteDraft, setNoteDraft] = useState("");
-  const [statusMessage, setStatusMessage] = useState("");
+  const [errorText, setErrorText] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     const [profileRes, notesRes] = await Promise.all([
@@ -31,12 +33,12 @@ export function MemoryPane({ client }: MemoryPaneProps) {
     if (profileRes.ok) {
       setProfile(profileRes.value.entries);
     } else {
-      setStatusMessage(profileRes.error);
+      setErrorText(profileRes.error);
     }
     if (notesRes.ok) {
       setNotes(notesRes.value.notes);
     } else {
-      setStatusMessage(notesRes.error);
+      setErrorText(notesRes.error);
     }
   }, [client, searchQuery]);
 
@@ -48,17 +50,17 @@ export function MemoryPane({ client }: MemoryPaneProps) {
     if (!profileKey.trim() || !profileValue.trim()) {
       return;
     }
+    setErrorText(null);
     const res = await client.setProfileEntry(
       profileKey.trim(),
       profileValue.trim(),
     );
     if (!res.ok) {
-      setStatusMessage(res.error);
+      setErrorText(res.error);
       return;
     }
     setProfileKey("");
     setProfileValue("");
-    setStatusMessage("Profile updated.");
     await refresh();
   };
 
@@ -66,121 +68,185 @@ export function MemoryPane({ client }: MemoryPaneProps) {
     if (!noteDraft.trim()) {
       return;
     }
+    setErrorText(null);
     const res = await client.addNote(noteDraft.trim());
     if (!res.ok) {
-      setStatusMessage(res.error);
+      setErrorText(res.error);
       return;
     }
     setNoteDraft("");
-    setStatusMessage("Note saved.");
     await refresh();
   };
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.heading}>Standing Profile</Text>
-      <View style={styles.row}>
-        <TextInput
-          style={styles.input}
-          value={profileKey}
-          onChangeText={setProfileKey}
-          placeholder="key (e.g. home_airport)"
-          placeholderTextColor="#6b7280"
-        />
-        <TextInput
-          style={styles.input}
-          value={profileValue}
-          onChangeText={setProfileValue}
-          placeholder="value (e.g. SFO)"
-          placeholderTextColor="#6b7280"
-        />
-        <Pressable
-          style={styles.button}
-          onPress={() => void handleSaveProfile()}
-        >
-          <Text style={styles.buttonText}>Save</Text>
-        </Pressable>
-      </View>
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={styles.contentWrap}
+    >
+      <View style={styles.column}>
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Preferences</Text>
+          <View style={styles.card}>
+            <View style={styles.inputRow}>
+              <TextInput
+                style={styles.input}
+                value={profileKey}
+                onChangeText={setProfileKey}
+                placeholder="Name"
+                placeholderTextColor={THEME.textTertiary}
+              />
+              <TextInput
+                style={styles.input}
+                value={profileValue}
+                onChangeText={setProfileValue}
+                placeholder="Value"
+                placeholderTextColor={THEME.textTertiary}
+                onSubmitEditing={() => {
+                  void handleSaveProfile();
+                }}
+              />
+              <Pressable
+                style={styles.primaryButton}
+                onPress={() => {
+                  void handleSaveProfile();
+                }}
+              >
+                <Text style={styles.primaryButtonText}>Add</Text>
+              </Pressable>
+            </View>
 
-      {profile.map((entry) => (
-        <View key={entry.key} style={styles.item}>
-          <Text style={styles.itemKey}>{entry.key}</Text>
-          <Text style={styles.itemValue}>{entry.value}</Text>
+            {profile.map((entry) => (
+              <View key={entry.key} style={styles.listRow}>
+                <Text style={styles.rowLabel}>{entry.key}</Text>
+                <Text style={styles.rowValue}>{entry.value}</Text>
+              </View>
+            ))}
+          </View>
         </View>
-      ))}
 
-      <Text style={styles.heading}>Searchable Notes (SQLite FTS5)</Text>
-      <View style={styles.row}>
-        <TextInput
-          style={styles.input}
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-          placeholder="Search notes..."
-          placeholderTextColor="#6b7280"
-        />
-        <Pressable style={styles.button} onPress={() => void refresh()}>
-          <Text style={styles.buttonText}>Search</Text>
-        </Pressable>
-      </View>
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Notes</Text>
+          <View style={styles.card}>
+            <View style={styles.inputRow}>
+              <TextInput
+                style={styles.input}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                placeholder="Search notes"
+                placeholderTextColor={THEME.textTertiary}
+                onSubmitEditing={() => {
+                  void refresh();
+                }}
+              />
+              <Pressable
+                style={styles.secondaryButton}
+                onPress={() => {
+                  void refresh();
+                }}
+              >
+                <Text style={styles.secondaryButtonText}>Search</Text>
+              </Pressable>
+            </View>
 
-      <View style={styles.row}>
-        <TextInput
-          style={styles.input}
-          value={noteDraft}
-          onChangeText={setNoteDraft}
-          placeholder="Add a dated memory note..."
-          placeholderTextColor="#6b7280"
-        />
-        <Pressable style={styles.button} onPress={() => void handleAddNote()}>
-          <Text style={styles.buttonText}>Add</Text>
-        </Pressable>
-      </View>
+            <View style={styles.inputRow}>
+              <TextInput
+                style={styles.input}
+                value={noteDraft}
+                onChangeText={setNoteDraft}
+                placeholder="New note"
+                placeholderTextColor={THEME.textTertiary}
+                onSubmitEditing={() => {
+                  void handleAddNote();
+                }}
+              />
+              <Pressable
+                style={styles.primaryButton}
+                onPress={() => {
+                  void handleAddNote();
+                }}
+              >
+                <Text style={styles.primaryButtonText}>Save</Text>
+              </Pressable>
+            </View>
 
-      {notes.map((note) => (
-        <View key={note.id} style={styles.item}>
-          <Text style={styles.itemKey}>
-            {note.date} · {note.category}
-          </Text>
-          <Text style={styles.itemValue}>{note.content}</Text>
+            {notes.map((note) => (
+              <View key={note.id} style={styles.noteRow}>
+                <Text style={styles.noteDate}>{note.date}</Text>
+                <Text style={styles.rowValue}>{note.content}</Text>
+              </View>
+            ))}
+          </View>
         </View>
-      ))}
 
-      {statusMessage ? (
-        <Text style={styles.status}>{statusMessage}</Text>
-      ) : null}
+        {errorText ? <Text style={styles.error}>{errorText}</Text> : null}
+      </View>
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#0f172a" },
-  content: { padding: 16, gap: 12 },
-  heading: { color: "#f8fafc", fontSize: 16, fontWeight: "700", marginTop: 8 },
-  row: { flexDirection: "row", gap: 8 },
+  container: { flex: 1, backgroundColor: THEME.canvas },
+  contentWrap: { padding: 28, alignItems: "center" },
+  column: { width: "100%", maxWidth: 640, gap: 24 },
+  section: { gap: 8 },
+  sectionTitle: {
+    color: THEME.textSecondary,
+    fontSize: 12,
+    fontWeight: "600",
+    paddingHorizontal: 4,
+  },
+  card: {
+    backgroundColor: THEME.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    padding: 14,
+    gap: 10,
+  },
+  inputRow: { flexDirection: "row", gap: 8, alignItems: "center" },
   input: {
     flex: 1,
-    backgroundColor: "#1e293b",
-    color: "#f8fafc",
+    backgroundColor: THEME.inputBg,
+    color: THEME.textPrimary,
     borderRadius: 8,
-    paddingHorizontal: 10,
+    paddingHorizontal: 11,
     paddingVertical: 8,
     fontSize: 13,
   },
-  button: {
-    backgroundColor: "#2563eb",
+  primaryButton: {
+    backgroundColor: THEME.blue,
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 8,
-    justifyContent: "center",
   },
-  buttonText: { color: "#ffffff", fontSize: 13, fontWeight: "600" },
-  item: {
-    backgroundColor: "#1e293b",
-    padding: 10,
+  primaryButtonText: { color: THEME.white, fontSize: 12, fontWeight: "600" },
+  secondaryButton: {
+    backgroundColor: THEME.inputBg,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
     borderRadius: 8,
-    gap: 4,
   },
-  itemKey: { color: "#93c5fd", fontSize: 12, fontWeight: "600" },
-  itemValue: { color: "#f8fafc", fontSize: 13 },
-  status: { color: "#fbbf24", fontSize: 12, marginTop: 8 },
+  secondaryButtonText: {
+    color: THEME.textPrimary,
+    fontSize: 12,
+    fontWeight: "500",
+  },
+  listRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: THEME.border,
+  },
+  noteRow: {
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: THEME.border,
+    gap: 3,
+  },
+  rowLabel: { color: THEME.textSecondary, fontSize: 13, fontWeight: "500" },
+  rowValue: { color: THEME.textPrimary, fontSize: 13, lineHeight: 18 },
+  noteDate: { color: THEME.textTertiary, fontSize: 11 },
+  error: { color: THEME.red, fontSize: 12 },
 });

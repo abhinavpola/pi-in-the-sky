@@ -4,11 +4,12 @@ import {
 } from "@pi-in-the-sky/client/agent-client";
 import {
   buildAccessAuthorizeUrl,
+  createPkceSession,
   DEPLOY_TO_CLOUDFLARE_URL,
   discoverCloudflareWorker,
-  exchangeAuthorizationCode,
   fetchWorkerStatus,
-  parseOAuthCallbackUrl,
+  handleOAuthCallbackUrl,
+  type PkceSession,
 } from "@pi-in-the-sky/client/onboarding";
 import { useEffect, useState } from "react";
 import {
@@ -39,62 +40,48 @@ export function OnboardingView({
   const [workerUrl, setWorkerUrl] = useState(initialBaseUrl);
   const [teamDomain, setTeamDomain] = useState("");
   const [clientId, setClientId] = useState("");
-  const [oauthState, setOauthState] = useState<string | null>(null);
+  const [pkceSession, setPkceSession] = useState<PkceSession | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
 
   useEffect(() => {
-    if (step !== "access_login" || !teamDomain || !clientId) {
+    if (step !== "access_login" || !teamDomain || !clientId || !pkceSession) {
       return;
     }
     const subscription = Linking.addEventListener("url", ({ url }) => {
-      const parsed = parseOAuthCallbackUrl(url);
-      switch (parsed.kind) {
-        case "ignore":
-          return;
-        case "error":
-          setStatusMessage(null);
-          setErrorText(parsed.message);
-          return;
-        case "code": {
-          if (oauthState && parsed.state !== oauthState) {
-            setStatusMessage(null);
-            setErrorText("OAuth state mismatch; please try signing in again.");
-            return;
-          }
-          setStatusMessage(
-            "Exchanging Cloudflare Access authorization code...",
-          );
-          void exchangeAuthorizationCode(
-            teamDomain,
-            clientId,
-            parsed.code,
-          ).then((tokenResult) => {
-            if (!tokenResult.ok) {
-              setStatusMessage(null);
-              setErrorText(tokenResult.error);
+      setStatusMessage("Exchanging Cloudflare Access authorization code...");
+      void handleOAuthCallbackUrl(url, teamDomain, clientId, pkceSession).then(
+        (result) => {
+          switch (result.kind) {
+            case "ignore":
               return;
+            case "error":
+              setPkceSession(null);
+              setStatusMessage(null);
+              setErrorText(result.message);
+              return;
+            case "exchanged":
+              setPkceSession(null);
+              onComplete({
+                baseUrl: workerUrl,
+                agentId: "me",
+                authToken: result.accessToken,
+                refreshToken: result.refreshToken,
+                accessTeamDomain: teamDomain,
+                accessClientId: clientId,
+              });
+              return;
+            default: {
+              result satisfies never;
             }
-            onComplete({
-              baseUrl: workerUrl,
-              agentId: "me",
-              authToken: tokenResult.accessToken,
-              refreshToken: tokenResult.refreshToken,
-              accessTeamDomain: teamDomain,
-              accessClientId: clientId,
-            });
-          });
-          return;
-        }
-        default: {
-          parsed satisfies never;
-        }
-      }
+          }
+        },
+      );
     });
     return () => {
       subscription.remove();
     };
-  }, [step, teamDomain, clientId, oauthState, workerUrl, onComplete]);
+  }, [step, teamDomain, clientId, pkceSession, workerUrl, onComplete]);
 
   const checkLiveness = async (candidateUrl: string) => {
     const validated = validateBaseUrl(candidateUrl);
@@ -172,12 +159,12 @@ export function OnboardingView({
 
   const handleAccessLogin = async () => {
     setErrorText(null);
-    const nextState = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setOauthState(nextState);
+    const nextPkce = await createPkceSession();
+    setPkceSession(nextPkce);
     const authorizeUrl = buildAccessAuthorizeUrl(
       teamDomain,
       clientId,
-      nextState,
+      nextPkce,
     );
     await Linking.openURL(authorizeUrl);
     setStatusMessage(

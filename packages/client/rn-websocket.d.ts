@@ -8,6 +8,15 @@ declare global {
   }
 
   var WebSocket: WebSocketConstructor;
+  var crypto: {
+    getRandomValues<T extends ArrayBufferView>(array: T): T;
+    subtle: {
+      digest(algorithm: string, data: BufferSource): Promise<ArrayBuffer>;
+    };
+  };
+  var TextEncoder: {
+    new (): { encode(input?: string): Uint8Array<ArrayBuffer> };
+  };
 }
 
 export {};

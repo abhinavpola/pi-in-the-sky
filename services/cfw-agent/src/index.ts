@@ -36,19 +36,64 @@ const SYSTEM_PREAMBLE = [
   "If a website requires sign-in, CAPTCHA, or MFA, call browser_request_takeover so the user can complete it in Live View.",
 ].join("\n");
 
-function hasLocalDevBearerAuth(request: Request, env: Env): boolean {
-  if (!env.AUTH_TOKEN) {
+function timingSafeEqualText(a: string, b: string): boolean {
+  const left = new TextEncoder().encode(a);
+  const right = new TextEncoder().encode(b);
+  if (left.length !== right.length) {
     return false;
   }
-  return request.headers.get("Authorization") === `Bearer ${env.AUTH_TOKEN}`;
+  let diff = 0;
+  for (let i = 0; i < left.length; i += 1) {
+    diff |= (left[i] ?? 0) ^ (right[i] ?? 0);
+  }
+  return diff === 0;
 }
 
-function withCors(response: Response): Response {
+function hasLocalDevBearerAuth(request: Request, env: Env): boolean {
+  if (env.CF_ACCESS_TEAM_DOMAIN || env.CF_ACCESS_AUD || !env.AUTH_TOKEN) {
+    return false;
+  }
+  const provided = request.headers.get("Authorization");
+  if (!provided) {
+    return false;
+  }
+  return timingSafeEqualText(provided, `Bearer ${env.AUTH_TOKEN}`);
+}
+
+function allowedCorsOrigin(request: Request): string | null {
+  const origin = request.headers.get("Origin");
+  if (!origin) {
+    return null;
+  }
+  try {
+    const parsed = new URL(origin);
+    const reqOrigin = new URL(request.url).origin;
+    if (origin === reqOrigin) {
+      return origin;
+    }
+    if (
+      parsed.protocol === "http:" &&
+      (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1")
+    ) {
+      return origin;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function withCors(request: Request, response: Response): Response {
   if (response.webSocket) {
     return response;
   }
+  const origin = allowedCorsOrigin(request);
+  if (!origin) {
+    return response;
+  }
   const headers = new Headers(response.headers);
-  headers.set("Access-Control-Allow-Origin", "*");
+  headers.set("Access-Control-Allow-Origin", origin);
+  headers.set("Vary", "Origin");
   headers.set(
     "Access-Control-Allow-Methods",
     "GET, POST, PUT, DELETE, OPTIONS",
@@ -292,13 +337,13 @@ export class PersonalAgent extends DurableObject<Env> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === "OPTIONS") {
-      return withCors(new Response(null, { status: 204 }));
+      return withCors(request, new Response(null, { status: 204 }));
     }
 
     const url = new URL(request.url);
 
     if (url.pathname === "/health") {
-      return withCors(Response.json({ ok: true }));
+      return withCors(request, Response.json({ ok: true }));
     }
 
     if (url.pathname === "/auth/config") {
@@ -309,7 +354,7 @@ export default {
         aud: env.CF_ACCESS_AUD ?? null,
         clientId: env.CF_ACCESS_OAUTH_CLIENT_ID ?? null,
       });
-      return withCors(Response.json(payload));
+      return withCors(request, Response.json(payload));
     }
 
     const identity = await verifyCloudflareAccessJwt(request, {
@@ -322,6 +367,7 @@ export default {
 
     if (!identity && !isDevAuthed) {
       return withCors(
+        request,
         Response.json({ error: "Unauthorized" }, { status: 401 }),
       );
     }
@@ -331,21 +377,27 @@ export default {
       const agentId = identity?.sub ?? "personal";
       const stub = env.PersonalAgent.getByName(agentId);
       const response = await stub.fetch(request);
-      return withCors(response);
+      return withCors(request, response);
     }
 
     const agentMatch = url.pathname.match(/^\/api\/agents\/([^/]+)(\/.*)?$/);
     if (!agentMatch?.[1]) {
-      return withCors(Response.json({ error: "Not found" }, { status: 404 }));
+      return withCors(
+        request,
+        Response.json({ error: "Not found" }, { status: 404 }),
+      );
     }
 
     const requestedId = decodeURIComponent(agentMatch[1]);
     if (identity && requestedId !== identity.sub) {
-      return withCors(Response.json({ error: "Forbidden" }, { status: 403 }));
+      return withCors(
+        request,
+        Response.json({ error: "Forbidden" }, { status: 403 }),
+      );
     }
 
     const stub = env.PersonalAgent.getByName(requestedId);
     const response = await stub.fetch(request);
-    return withCors(response);
+    return withCors(request, response);
   },
 };

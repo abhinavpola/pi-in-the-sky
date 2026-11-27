@@ -3,7 +3,7 @@ import { z } from "zod";
 import { AuthConfigResponseSchema } from "./protocol";
 
 const REPO_URL = "https://github.com/abhinavpola/pi-in-the-sky";
-const DEFAULT_WORKER_NAME = "pi-in-the-sky";
+const DEFAULT_WORKER_NAME = "pi-in-the-sky-agent";
 
 export const DEPLOY_TO_CLOUDFLARE_URL = `https://deploy.workers.cloudflare.com/?url=${encodeURIComponent(REPO_URL)}`;
 const ACCESS_REDIRECT_URI = "piinthesky://auth/callback";
@@ -93,10 +93,58 @@ function parseQueryParams(url: string): Map<string, string> {
   return params;
 }
 
+export type PkceSession = {
+  readonly state: string;
+  readonly codeVerifier: string;
+  readonly codeChallenge: string;
+};
+
+const BASE64URL_ALPHABET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+function toBase64Url(bytes: Uint8Array): string {
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i] ?? 0;
+    const b = bytes[i + 1];
+    const c = bytes[i + 2];
+    const n = (a << 16) | ((b ?? 0) << 8) | (c ?? 0);
+    out += BASE64URL_ALPHABET[(n >> 18) & 63];
+    out += BASE64URL_ALPHABET[(n >> 12) & 63];
+    if (b !== undefined) {
+      out += BASE64URL_ALPHABET[(n >> 6) & 63];
+    }
+    if (c !== undefined) {
+      out += BASE64URL_ALPHABET[n & 63];
+    }
+  }
+  return out;
+}
+
+function randomBase64Url(byteLength: number): string {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return toBase64Url(bytes);
+}
+
+export async function createPkceSession(): Promise<PkceSession> {
+  const state = randomBase64Url(32);
+  const codeVerifier = randomBase64Url(32);
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(codeVerifier),
+  );
+  return {
+    state,
+    codeVerifier,
+    codeChallenge: toBase64Url(new Uint8Array(digest)),
+  };
+}
+
 export function buildAccessAuthorizeUrl(
   teamDomain: string,
   clientId: string,
-  state?: string,
+  pkce: PkceSession,
 ): string {
   const origin = normalizeTeamOrigin(teamDomain);
   const params: Record<string, string> = {
@@ -104,14 +152,14 @@ export function buildAccessAuthorizeUrl(
     response_type: "code",
     redirect_uri: ACCESS_REDIRECT_URI,
     scope: "openid email profile offline_access",
+    state: pkce.state,
+    code_challenge: pkce.codeChallenge,
+    code_challenge_method: "S256",
   };
-  if (state) {
-    params.state = state;
-  }
   return `${origin}/cdn-cgi/access/sso/oauth2/auth?${encodeFormBody(params)}`;
 }
 
-export function parseOAuthCallbackUrl(url: string): OAuthCallbackResult {
+function parseOAuthCallbackUrl(url: string): OAuthCallbackResult {
   if (!url.startsWith(ACCESS_REDIRECT_URI)) {
     return { kind: "ignore" };
   }
@@ -174,17 +222,69 @@ async function postTokenEndpoint(
   }
 }
 
-export function exchangeAuthorizationCode(
+function exchangeAuthorizationCode(
   teamDomain: string,
   clientId: string,
   code: string,
+  codeVerifier: string,
 ): Promise<OAuthTokenResult> {
   return postTokenEndpoint(teamDomain, {
     grant_type: "authorization_code",
     client_id: clientId,
     code,
+    code_verifier: codeVerifier,
     redirect_uri: ACCESS_REDIRECT_URI,
   });
+}
+
+type OAuthCallbackExchangeResult =
+  | { readonly kind: "ignore" }
+  | { readonly kind: "error"; readonly message: string }
+  | {
+      readonly kind: "exchanged";
+      readonly accessToken: string;
+      readonly refreshToken?: string;
+    };
+
+export async function handleOAuthCallbackUrl(
+  url: string,
+  teamDomain: string,
+  clientId: string,
+  pkce: PkceSession,
+): Promise<OAuthCallbackExchangeResult> {
+  const parsed = parseOAuthCallbackUrl(url);
+  switch (parsed.kind) {
+    case "ignore":
+      return { kind: "ignore" };
+    case "error":
+      return { kind: "error", message: parsed.message };
+    case "code": {
+      if (parsed.state !== pkce.state) {
+        return {
+          kind: "error",
+          message: "OAuth state mismatch; please try signing in again.",
+        };
+      }
+      const tokenResult = await exchangeAuthorizationCode(
+        teamDomain,
+        clientId,
+        parsed.code,
+        pkce.codeVerifier,
+      );
+      if (!tokenResult.ok) {
+        return { kind: "error", message: tokenResult.error };
+      }
+      return {
+        kind: "exchanged",
+        accessToken: tokenResult.accessToken,
+        refreshToken: tokenResult.refreshToken,
+      };
+    }
+    default: {
+      parsed satisfies never;
+      return { kind: "ignore" };
+    }
+  }
 }
 
 export function refreshAccessToken(

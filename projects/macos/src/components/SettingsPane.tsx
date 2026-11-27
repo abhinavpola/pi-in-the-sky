@@ -5,10 +5,13 @@ import {
 } from "@pi-in-the-sky/client/agent-client";
 import {
   buildAccessAuthorizeUrl,
+  createPkceSession,
   fetchWorkerStatus,
+  handleOAuthCallbackUrl,
+  type PkceSession,
   refreshAccessToken,
 } from "@pi-in-the-sky/client/onboarding";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Linking,
   Pressable,
@@ -34,6 +37,56 @@ export function SettingsPane({
   const [authToken, setAuthToken] = useState(config.authToken);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [pendingAuth, setPendingAuth] = useState<{
+    readonly baseUrl: string;
+    readonly teamDomain: string;
+    readonly clientId: string;
+    readonly pkce: PkceSession;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!pendingAuth) {
+      return;
+    }
+    const subscription = Linking.addEventListener("url", ({ url }) => {
+      setStatusMessage("Exchanging Cloudflare Access authorization code...");
+      void handleOAuthCallbackUrl(
+        url,
+        pendingAuth.teamDomain,
+        pendingAuth.clientId,
+        pendingAuth.pkce,
+      ).then((result) => {
+        switch (result.kind) {
+          case "ignore":
+            return;
+          case "error":
+            setPendingAuth(null);
+            setStatusMessage(null);
+            setValidationError(result.message);
+            return;
+          case "exchanged":
+            setPendingAuth(null);
+            setAuthToken(result.accessToken);
+            setStatusMessage("Signed in with Cloudflare Access.");
+            onSave({
+              baseUrl: pendingAuth.baseUrl,
+              agentId: "me",
+              authToken: result.accessToken,
+              refreshToken: result.refreshToken,
+              accessTeamDomain: pendingAuth.teamDomain,
+              accessClientId: pendingAuth.clientId,
+            });
+            return;
+          default: {
+            result satisfies never;
+          }
+        }
+      });
+    });
+    return () => {
+      subscription.remove();
+    };
+  }, [pendingAuth, onSave]);
 
   const handleSave = () => {
     const validated = validateBaseUrl(baseUrl);
@@ -45,7 +98,7 @@ export function SettingsPane({
     onSave({
       ...config,
       baseUrl: validated.value,
-      agentId: agentId.trim() || "personal",
+      agentId: agentId.trim() || "me",
       authToken: authToken.trim(),
     });
   };
@@ -71,11 +124,18 @@ export function SettingsPane({
         );
         return;
       case "live_oauth_ready": {
+        const pkce = await createPkceSession();
+        setPendingAuth({
+          baseUrl: status.baseUrl,
+          teamDomain: status.teamDomain,
+          clientId: status.clientId,
+          pkce,
+        });
         await Linking.openURL(
-          buildAccessAuthorizeUrl(status.teamDomain, status.clientId),
+          buildAccessAuthorizeUrl(status.teamDomain, status.clientId, pkce),
         );
         setStatusMessage(
-          "Opened system browser for Cloudflare Access sign-in (with refreshable session).",
+          "Waiting for Cloudflare Access sign-in callback (piinthesky://auth/callback)...",
         );
         return;
       }

@@ -34,8 +34,27 @@ const DeviceTokenErrorSchema = z.object({
 const ResultInfoSchema = z
   .object({
     total_pages: z.number().int().positive().optional(),
+    total_count: z.number().int().nonnegative().optional(),
+    per_page: z.number().int().positive().optional(),
   })
   .optional();
+
+function resolveTotalPages(
+  info: z.infer<typeof ResultInfoSchema>,
+  fallbackPageSize: number,
+): number {
+  if (!info) {
+    return 1;
+  }
+  if (info.total_pages !== undefined) {
+    return info.total_pages;
+  }
+  if (info.total_count !== undefined) {
+    const perPage = info.per_page ?? fallbackPageSize;
+    return Math.max(1, Math.ceil(info.total_count / perPage));
+  }
+  return 1;
+}
 
 const MembershipsResponseSchema = z.object({
   result: z.array(
@@ -120,7 +139,7 @@ export async function listCloudflareAccounts(
         });
       }
     }
-    totalPages = parsed.data.result_info?.total_pages ?? 1;
+    totalPages = resolveTotalPages(parsed.data.result_info, 50);
     page += 1;
   }
   if (seen.size > 0) {
@@ -153,7 +172,7 @@ export async function listCloudflareAccounts(
         });
       }
     }
-    totalPages = accountsParsed.data.result_info?.total_pages ?? 1;
+    totalPages = resolveTotalPages(accountsParsed.data.result_info, 50);
     page += 1;
   }
   if (seen.size === 0) {

@@ -20,6 +20,7 @@ type PiInTheSkyNativeBridge = {
   readonly loadConnectionConfig: () => Promise<unknown>;
   readonly saveConnectionConfig: (payload: string) => Promise<unknown>;
   readonly clearConnectionConfig: () => Promise<unknown>;
+  readonly randomBase64Url: (byteLength: number) => Promise<unknown>;
 };
 
 function isNativeBridge(value: unknown): value is PiInTheSkyNativeBridge {
@@ -34,7 +35,9 @@ function isNativeBridge(value: unknown): value is PiInTheSkyNativeBridge {
     "saveConnectionConfig" in value &&
     typeof value.saveConnectionConfig === "function" &&
     "clearConnectionConfig" in value &&
-    typeof value.clearConnectionConfig === "function"
+    typeof value.clearConnectionConfig === "function" &&
+    "randomBase64Url" in value &&
+    typeof value.randomBase64Url === "function"
   );
 }
 
@@ -195,5 +198,24 @@ export async function clearStoredConnectionConfig(): Promise<
     return err(
       formatError(error, "Failed to clear connection config from Keychain."),
     );
+  }
+}
+
+export async function generateRandomToken(
+  byteLength: number,
+): Promise<Result<string, string>> {
+  const bridge = getNativeBridge();
+  if (!bridge.ok) {
+    return bridge;
+  }
+
+  try {
+    const token = await bridge.value.randomBase64Url(byteLength);
+    if (typeof token !== "string" || token.length === 0) {
+      return err("Native random token generator returned an invalid value.");
+    }
+    return ok(token);
+  } catch (error) {
+    return err(formatError(error, "Failed to generate authentication token."));
   }
 }

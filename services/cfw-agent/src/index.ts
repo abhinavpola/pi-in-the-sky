@@ -65,15 +65,19 @@ function isLocalDevHost(request: Request): boolean {
   }
 }
 
-function hasLocalDevBearerAuth(request: Request, env: Env): boolean {
+function hasWorkerBearerAuth(request: Request, env: Env): boolean {
   if (env.CF_ACCESS_TEAM_DOMAIN || env.CF_ACCESS_AUD) {
-    return false;
-  }
-  if (!isLocalDevHost(request)) {
     return false;
   }
   const provided = request.headers.get("Authorization");
   if (!provided) {
+    return false;
+  }
+  const configuredToken = env.AGENT_AUTH_TOKEN?.trim();
+  if (configuredToken && configuredToken.length > 0) {
+    return timingSafeEqualText(provided, `Bearer ${configuredToken}`);
+  }
+  if (!isLocalDevHost(request)) {
     return false;
   }
   return timingSafeEqualText(provided, `Bearer ${LOCAL_DEV_AUTH_TOKEN}`);
@@ -387,9 +391,9 @@ export default {
       aud: env.CF_ACCESS_AUD,
     });
 
-    const isDevAuthed = !identity && hasLocalDevBearerAuth(request, env);
+    const isBearerAuthed = !identity && hasWorkerBearerAuth(request, env);
 
-    if (!identity && !isDevAuthed) {
+    if (!identity && !isBearerAuthed) {
       return withCors(
         request,
         Response.json({ error: "Unauthorized" }, { status: 401 }),

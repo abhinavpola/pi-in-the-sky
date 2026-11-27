@@ -2,7 +2,8 @@
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "composite": true,
-    "lib": ["ESNext", "DOM"]
+    "lib": ["ESNext", "DOM"],
+    "resolveJsonModule": true
   },
-  "include": ["*.ts"]
+  "include": ["*.ts", "generated/*.json"]
 }

@@ -8,5 +8,6 @@ export interface Env {
   CF_ACCESS_TEAM_DOMAIN?: string;
   CF_ACCESS_AUD?: string;
   CF_ACCESS_OAUTH_CLIENT_ID?: string;
+  AGENT_AUTH_TOKEN?: string;
   NEARAI_API_KEY?: string;
 }

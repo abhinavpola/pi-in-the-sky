@@ -1,17 +1,17 @@
 import { z } from "zod";
 
 import {
+  type CloudflareAccount,
   encodeFormBody,
   listCloudflareAccounts,
 } from "./cloudflare-device-auth";
+import {
+  DEFAULT_WORKER_NAME,
+  type DeployedWorker,
+} from "./cloudflare-worker-api";
 import { randomBase64Url, sha256Base64Url } from "./pkce";
 import { AuthConfigResponseSchema } from "./protocol";
 
-const WORKER_REPO_URL =
-  "https://github.com/abhinavpola/pi-in-the-sky/tree/main/services/cfw-agent";
-const DEFAULT_WORKER_NAME = "pi-in-the-sky-agent";
-
-export const DEPLOY_TO_CLOUDFLARE_URL = `https://deploy.workers.cloudflare.com/?url=${encodeURIComponent(WORKER_REPO_URL)}`;
 const ACCESS_REDIRECT_URI = "piinthesky://auth/callback";
 
 const SubdomainResponseSchema = z.object({
@@ -35,11 +35,7 @@ type WorkerStatus =
       readonly clientId: string;
     };
 
-export type DiscoveredWorker = {
-  readonly accountId: string;
-  readonly accountName: string;
-  readonly baseUrl: string;
-};
+export type DiscoveredWorker = DeployedWorker;
 
 type WorkerDiscoveryResult =
   | {
@@ -47,7 +43,10 @@ type WorkerDiscoveryResult =
       readonly matches: readonly DiscoveredWorker[];
       readonly accountCount: number;
     }
-  | { readonly kind: "not_deployed"; readonly accountId: string }
+  | {
+      readonly kind: "not_deployed";
+      readonly deployableAccounts: readonly CloudflareAccount[];
+    }
   | { readonly kind: "error"; readonly message: string };
 
 type OAuthTokenResult =
@@ -337,7 +336,10 @@ export async function discoverCloudflareWorker(
           { headers },
         );
         if (scriptRes.status === 404) {
-          return { kind: "not_deployed" as const, accountId: account.id };
+          return {
+            kind: "not_deployed" as const,
+            account,
+          };
         }
         if (scriptRes.status === 403) {
           return { kind: "forbidden" as const };
@@ -393,9 +395,14 @@ export async function discoverCloudflareWorker(
     if (firstError) {
       return firstError;
     }
-    const deployable = checks.find((item) => item.kind === "not_deployed");
-    if (deployable) {
-      return { kind: "not_deployed", accountId: deployable.accountId };
+    const deployableAccounts: CloudflareAccount[] = [];
+    for (const item of checks) {
+      if (item.kind === "not_deployed") {
+        deployableAccounts.push(item.account);
+      }
+    }
+    if (deployableAccounts.length > 0) {
+      return { kind: "not_deployed", deployableAccounts };
     }
     return {
       kind: "error",
@@ -413,6 +420,7 @@ export async function provisionWorkerSecrets(
   cfApiToken: string,
   accountId: string,
   nearAiApiKey: string,
+  agentAuthToken: string,
 ): Promise<
   { readonly ok: true } | { readonly ok: false; readonly error: string }
 > {
@@ -422,22 +430,31 @@ export async function provisionWorkerSecrets(
     Authorization: `Bearer ${cfApiToken.trim()}`,
     "Content-Type": "application/json",
   };
-  const secret = {
-    name: "NEARAI_API_KEY",
-    text: nearAiApiKey.trim(),
-    type: "secret_text",
-  };
+  const secrets = [
+    {
+      name: "NEARAI_API_KEY",
+      text: nearAiApiKey.trim(),
+      type: "secret_text",
+    },
+    {
+      name: "AGENT_AUTH_TOKEN",
+      text: agentAuthToken.trim(),
+      type: "secret_text",
+    },
+  ];
   try {
-    const response = await fetch(endpoint, {
-      method: "PUT",
-      headers,
-      body: JSON.stringify(secret),
-    });
-    if (!response.ok) {
-      return {
-        ok: false,
-        error: `Cloudflare secrets API returned HTTP ${response.status}`,
-      };
+    for (const secret of secrets) {
+      const response = await fetch(endpoint, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(secret),
+      });
+      if (!response.ok) {
+        return {
+          ok: false,
+          error: `Cloudflare secrets API returned HTTP ${response.status} for ${secret.name}`,
+        };
+      }
     }
     return { ok: true };
   } catch (thrown) {

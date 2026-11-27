@@ -160,6 +160,20 @@ export function App() {
     });
   };
 
+  const handleOffboard = () => {
+    sessionEpochRef.current += 1;
+    setErrorBanner(null);
+    setShowDrawer(false);
+    client.clearSession();
+    setConfig(DEFAULT_CONFIG);
+    setViewMode("onboarding");
+    void clearStoredConnectionConfig().then((cleared) => {
+      if (!cleared.ok) {
+        setErrorBanner(cleared.error);
+      }
+    });
+  };
+
   const handleResumeTakeover = (id: string) => {
     client.resumeTakeover(id);
     setActiveTakeovers((prev) => prev.filter((item) => item.id !== id));
@@ -207,6 +221,7 @@ export function App() {
             getSessionEpoch={() => sessionEpochRef.current}
             onSave={applyAndPersistConfig}
             onSignOut={handleSignOut}
+            onOffboard={handleOffboard}
           />
         );
       default: {

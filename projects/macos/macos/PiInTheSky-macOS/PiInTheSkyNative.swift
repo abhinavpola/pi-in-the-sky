@@ -195,4 +195,31 @@ final class PiInTheSkyNative: NSObject, ASWebAuthenticationPresentationContextPr
       nil
     )
   }
+
+  @objc(randomBase64Url:resolve:reject:)
+  func randomBase64Url(
+    byteLength: NSNumber,
+    resolve: @escaping RCTPromiseResolveBlock,
+    reject: @escaping RCTPromiseRejectBlock
+  ) {
+    let count = byteLength.intValue
+    guard count > 0, count <= 128 else {
+      reject("RANDOM_INVALID_LENGTH", "Random byte length must be between 1 and 128.", nil)
+      return
+    }
+
+    var bytes = [UInt8](repeating: 0, count: count)
+    let status = SecRandomCopyBytes(kSecRandomDefault, count, &bytes)
+    guard status == errSecSuccess else {
+      reject("RANDOM_ERROR", "SecRandomCopyBytes failed (\(status)).", nil)
+      return
+    }
+
+    let encoded = Data(bytes)
+      .base64EncodedString()
+      .replacingOccurrences(of: "+", with: "-")
+      .replacingOccurrences(of: "/", with: "_")
+      .replacingOccurrences(of: "=", with: "")
+    resolve(encoded)
+  }
 }

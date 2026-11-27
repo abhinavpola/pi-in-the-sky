@@ -1,6 +1,5 @@
 import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
-import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import {
   AuthConfigResponseSchema,
   LOCAL_DEV_AUTH_TOKEN,
@@ -14,9 +13,11 @@ import type { Env } from "../env";
 import { verifyCloudflareAccessJwt } from "./access-auth";
 import { ActivityStore, createActivitiesExtension } from "./activities";
 import {
+  type BrowserExecutor,
   BrowserStore,
   BrowserTakeoverSignal,
   createBrowserExtension,
+  createPuppeteerBrowserExecutor,
 } from "./browser";
 import { ConnectorStore, createConnectorsExtension } from "./connectors";
 import type { HttpFetcher } from "./http-tool";
@@ -24,15 +25,13 @@ import { createMemoryExtension, MemoryStore } from "./memory";
 import { createNearAiProvider, DEFAULT_NEARAI_MODEL } from "./providers";
 import { createSkillsExtension } from "./skills";
 import { ACCESS_TOKEN_EXP_HEADER, AgentSockets } from "./sockets";
-import { VaultCipher } from "./vault";
-import { createEncryptedSqliteDatabase } from "./vault-sqlite";
 
 const SYSTEM_PREAMBLE = [
-  "You are a private, autonomous personal AI assistant running durably on Cloudflare with end-to-end encrypted storage and attested TEE inference.",
+  "You are a private, autonomous personal AI assistant running durably on Cloudflare with attested TEE inference.",
   "This is one continuous conversation with your user—never ask them to pick a thread or start a new chat.",
   "For multi-step or backgroundable tasks (trip research, inbox triage, bookings, monitoring), call activity_spawn to launch a dedicated subagent session so the main stream stays responsive.",
   "When the user sends a follow-up that could apply to more than one active activity, ask a brief clarifying question before steering.",
-  "Use your encrypted memory tools to recall and update durable user preferences and dated notes.",
+  "Use your memory tools to recall and update durable user preferences and dated notes.",
   "Use load_skill when a relevant bundled playbook exists.",
   "Ask the user in chat for permission whenever an action is irreversible, involves spending money, or sends external communications.",
   "If a website requires sign-in, CAPTCHA, or MFA, call browser_request_takeover so the user can complete it in Live View.",
@@ -51,8 +50,26 @@ function timingSafeEqualText(a: string, b: string): boolean {
   return diff === 0;
 }
 
+function isLocalDevHost(request: Request): boolean {
+  try {
+    const host = new URL(request.url).hostname.toLowerCase();
+    return (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "::1" ||
+      host === "[::1]" ||
+      host.endsWith(".test")
+    );
+  } catch {
+    return false;
+  }
+}
+
 function hasLocalDevBearerAuth(request: Request, env: Env): boolean {
   if (env.CF_ACCESS_TEAM_DOMAIN || env.CF_ACCESS_AUD) {
+    return false;
+  }
+  if (!isLocalDevHost(request)) {
     return false;
   }
   const provided = request.headers.get("Authorization");
@@ -125,31 +142,19 @@ function withCors(request: Request, response: Response): Response {
 }
 
 export class PersonalAgent extends DurableObject<Env> {
-  readonly vault = new VaultCipher(
-    this.ctx.storage.sql,
-    () => this.env.VAULT_MASTER_KEY,
-  );
-  readonly memory = new MemoryStore(this.ctx.storage.sql, this.vault);
-  readonly connectors = new ConnectorStore(this.ctx.storage.sql, this.vault);
-  readonly browser = new BrowserStore(this.ctx.storage.sql, this.vault);
-  readonly activities = new ActivityStore(this.ctx.storage.sql, this.vault);
+  readonly memory = new MemoryStore(this.ctx.storage.sql);
+  readonly connectors = new ConnectorStore(this.ctx.storage.sql);
+  readonly browser = new BrowserStore(this.ctx.storage.sql);
+  readonly activities = new ActivityStore(this.ctx.storage.sql);
   readonly registry = createRegistry();
 
   readonly harness = new PiHarness({
-    harness: async ({ context, onWake }) => {
+    harness: ({ storage, context, onWake }) => {
       this.#installExtensions();
-      const encryptedDb = createEncryptedSqliteDatabase(
-        this.ctx.storage,
-        this.vault,
-      );
-      const encryptedStorage = await SqliteStorage.open(encryptedDb, {
-        prefix: "pi_vault",
-      });
-      const { models } = this.createModelRegistry();
       return Harness.open(
-        encryptedStorage,
+        storage,
         {
-          models,
+          models: this.createModelRegistry().models,
           registry: this.registry,
           onWake,
           settings: {
@@ -168,29 +173,30 @@ export class PersonalAgent extends DurableObject<Env> {
     this.harness,
     this.registry,
     (tag) => this.ctx.getWebSockets(tag),
+    (socket) => this.ctx.getTags(socket),
     {
       onResumeTakeover: async (takeoverId, note) =>
         this.resumeTakeover(takeoverId, note),
       onClearWaitingTakeovers: (conversationId) =>
         this.browser.clearWaitingTakeovers(conversationId),
-      listWaitingTakeovers: () => this.browser.listWaitingTakeovers(),
-      listActivities: () => this.activities.listActivities(),
+      listWaitingTakeovers: async () => this.browser.listWaitingTakeovers(),
+      listActivities: async () => this.activities.listActivities(),
       onSteerActivity: (activityId, instruction) =>
         this.steerActivity(activityId, instruction),
       onToggleActivity: (activityId, collapsed) =>
         this.toggleActivity(activityId, collapsed),
       onCompactThread: (summary) => this.compactThread(summary),
       onGetProfile: async () => ({
-        entries: await this.memory.getProfile(),
+        entries: this.memory.getProfile(),
       }),
       onSetProfile: async (key, value) => {
-        await this.memory.setProfileEntry(key, value);
+        this.memory.setProfileEntry(key, value);
         return { ok: true };
       },
       onSearchNotes: async (query, limit) => ({
-        notes: await this.memory.searchNotes(query ?? "", limit ?? 20),
+        notes: this.memory.searchNotes(query ?? "", limit ?? 20),
       }),
-      onAddNote: (content, category) =>
+      onAddNote: async (content, category) =>
         this.memory.addNote(content, category ?? "general"),
       onSetConnectorToken: async (
         provider,
@@ -198,7 +204,7 @@ export class PersonalAgent extends DurableObject<Env> {
         refreshToken,
         expiresAt,
       ) => {
-        await this.connectors.setToken(
+        this.connectors.setToken(
           provider,
           accessToken,
           refreshToken,
@@ -234,8 +240,8 @@ export class PersonalAgent extends DurableObject<Env> {
     return (input, init) => fetch(input, init);
   }
 
-  protected resolveBrowserBinding(): Pick<Fetcher, "fetch"> | undefined {
-    return this.env.BROWSER;
+  protected createBrowserExecutor(): BrowserExecutor {
+    return createPuppeteerBrowserExecutor(() => this.env.BROWSER, this.browser);
   }
 
   #installExtensions(): void {
@@ -260,13 +266,13 @@ export class PersonalAgent extends DurableObject<Env> {
         this.sockets.broadcastActivity(record);
       }),
     );
-    const fetcher = this.createFetcher();
-    this.registry.install(createConnectorsExtension(this.connectors, fetcher));
+    this.registry.install(
+      createConnectorsExtension(this.connectors, this.createFetcher()),
+    );
     this.registry.install(
       createBrowserExtension(
         this.browser,
-        () => this.resolveBrowserBinding(),
-        this.ctx.id.toString(),
+        this.createBrowserExecutor(),
         (record) => {
           this.sockets.broadcastTakeover(record);
         },
@@ -286,7 +292,7 @@ export class PersonalAgent extends DurableObject<Env> {
     readonly takeoverId: string;
     readonly delivered: string;
   }> {
-    const record = await this.browser.getTakeover(takeoverId);
+    const record = this.browser.getTakeover(takeoverId);
     if (!record) {
       throw new Error(`Unknown takeoverId: ${takeoverId}`);
     }
@@ -310,14 +316,14 @@ export class PersonalAgent extends DurableObject<Env> {
     readonly activityId: string;
     readonly operationId: string;
   }> {
-    const record = await this.activities.getActivity(activityId);
+    const record = this.activities.getActivity(activityId);
     if (!record) {
       throw new Error(`Unknown activityId: ${activityId}`);
     }
     const receipt = await this.harness
       .session(record.sessionId)
       .submit(instruction, { whenBusy: "steer" });
-    const updated = await this.activities.updateActivity(activityId, {
+    const updated = this.activities.updateActivity(activityId, {
       status: "running",
       collapsed: false,
     });
@@ -334,7 +340,7 @@ export class PersonalAgent extends DurableObject<Env> {
     activityId: string,
     collapsed: boolean,
   ): Promise<{ readonly activityId: string; readonly collapsed: boolean }> {
-    const updated = await this.activities.updateActivity(activityId, {
+    const updated = this.activities.updateActivity(activityId, {
       collapsed,
     });
     if (!updated) {
@@ -347,7 +353,7 @@ export class PersonalAgent extends DurableObject<Env> {
   async compactThread(
     summary: string,
   ): Promise<{ readonly ok: true; readonly noteId: number }> {
-    const note = await this.memory.addNote(summary, "compaction");
+    const note = this.memory.addNote(summary, "compaction");
     await this.harness.session(ROOT_SESSION).reset(summary);
     return { ok: true, noteId: note.id };
   }

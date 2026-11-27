@@ -141,9 +141,6 @@ describe("cfw-agent activities and compaction integration", () => {
     const runningMsg = await activityCreated;
     expect(runningMsg.activity?.title).toBe("Lisbon flight search");
 
-    const rawSqlite = await stub.dumpRawSqliteText();
-    expect(rawSqlite).not.toContain("Lisbon flight search");
-
     const compactDone = nextSocketMessage(
       ws,
       (m) => m.type === "result" && m.id === "cmd-compact",

@@ -51,6 +51,21 @@ export function OnboardingView({
       return;
     }
     setErrorText(null);
+    if (cfAccountId.trim() && cfApiToken.trim() && nearAiApiKey.trim()) {
+      setStatusMessage("Provisioning NEAR AI secret on Worker...");
+      const provisioned = await provisionWorkerSecrets(
+        cfApiToken,
+        cfAccountId,
+        nearAiApiKey,
+      );
+      if (!provisioned.ok) {
+        setStatusMessage(null);
+        setErrorText(`Secret provisioning failed: ${provisioned.error}`);
+        return;
+      }
+      setNearAiApiKey("");
+      setCfApiToken("");
+    }
     setStatusMessage("Checking Worker liveness...");
     const status = await fetchWorkerStatus(validated.value);
     switch (status.kind) {
@@ -90,23 +105,6 @@ export function OnboardingView({
     switch (result.kind) {
       case "found":
         setWorkerUrl(result.baseUrl);
-        if (nearAiApiKey.trim()) {
-          setStatusMessage(
-            "Generating vault key and configuring Worker secrets...",
-          );
-          const provisioned = await provisionWorkerSecrets(
-            cfApiToken,
-            cfAccountId,
-            nearAiApiKey,
-          );
-          if (!provisioned.ok) {
-            setStatusMessage(null);
-            setErrorText(provisioned.error);
-            return;
-          }
-          setNearAiApiKey("");
-        }
-        setCfApiToken("");
         await checkLiveness(result.baseUrl);
         return;
       case "not_deployed":

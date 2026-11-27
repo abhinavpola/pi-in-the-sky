@@ -3,11 +3,10 @@ import { num, obj, opt, str } from "@earendil-works/pi-schema";
 import type { MemoryNote, ProfileEntry } from "@pi-in-the-sky/client/protocol";
 
 import { jsonToolResult } from "./http-tool";
-import type { VaultCipher } from "./vault";
 
 type ProfileRow = {
   key: string;
-  value_enc: string;
+  value: string;
   updated_at: number;
 };
 
@@ -15,7 +14,7 @@ type NoteRow = {
   id: number;
   date: string;
   category: string;
-  content_enc: string;
+  content: string;
   created_at: number;
 };
 
@@ -23,81 +22,85 @@ function todayIsoDate(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+function toFtsQuery(raw: string): string {
+  return raw
+    .trim()
+    .split(/\s+/)
+    .map((token) => token.replace(/[^a-zA-Z0-9_-]/g, ""))
+    .filter(Boolean)
+    .map((token) => `"${token}"*`)
+    .join(" ");
+}
+
 export class MemoryStore {
   readonly #sql: SqlStorage;
-  readonly #vault: VaultCipher;
 
-  constructor(sql: SqlStorage, vault: VaultCipher) {
+  constructor(sql: SqlStorage) {
     this.#sql = sql;
-    this.#vault = vault;
     this.#sql.exec(`
-      CREATE TABLE IF NOT EXISTS user_profile_vault (
+      CREATE TABLE IF NOT EXISTS user_profile (
         key TEXT PRIMARY KEY,
-        value_enc TEXT NOT NULL,
+        value TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS memory_notes_vault (
+      CREATE TABLE IF NOT EXISTS memory_notes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT NOT NULL,
         category TEXT NOT NULL,
-        content_enc TEXT NOT NULL,
+        content TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS memory_notes_fts USING fts5(
+        content,
+        category,
+        date,
+        content='memory_notes',
+        content_rowid='id'
+      );
+
+      CREATE TRIGGER IF NOT EXISTS memory_notes_ai AFTER INSERT ON memory_notes BEGIN
+        INSERT INTO memory_notes_fts(rowid, content, category, date)
+        VALUES (new.id, new.content, new.category, new.date);
+      END;
     `);
   }
 
-  async getProfile(): Promise<ProfileEntry[]> {
-    const rows = this.#sql
+  getProfile(): ProfileEntry[] {
+    return this.#sql
       .exec<ProfileRow>(
-        "SELECT key, value_enc, updated_at FROM user_profile_vault ORDER BY key ASC",
+        "SELECT key, value, updated_at FROM user_profile ORDER BY key ASC",
       )
-      .toArray();
-    return Promise.all(
-      rows.map(async (row) => ({
+      .toArray()
+      .map((row) => ({
         key: row.key,
-        value: await this.#vault.decryptText(
-          row.value_enc,
-          `user_profile:${row.key}`,
-        ),
+        value: row.value,
         updatedAt: row.updated_at,
-      })),
-    );
+      }));
   }
 
-  async setProfileEntry(key: string, value: string): Promise<ProfileEntry> {
+  setProfileEntry(key: string, value: string): ProfileEntry {
     const now = Date.now();
-    const encrypted = await this.#vault.encryptText(
-      value,
-      `user_profile:${key}`,
-    );
     this.#sql.exec(
-      `INSERT INTO user_profile_vault (key, value_enc, updated_at)
+      `INSERT INTO user_profile (key, value, updated_at)
        VALUES (?, ?, ?)
-       ON CONFLICT(key) DO UPDATE SET value_enc = excluded.value_enc, updated_at = excluded.updated_at`,
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       key,
-      encrypted,
+      value,
       now,
     );
     return { key, value, updatedAt: now };
   }
 
-  async addNote(
-    content: string,
-    category = "general",
-    date?: string,
-  ): Promise<MemoryNote> {
+  addNote(content: string, category = "general", date?: string): MemoryNote {
     const noteDate = date ?? todayIsoDate();
     const now = Date.now();
-    const encrypted = await this.#vault.encryptText(
-      content,
-      `memory_notes:${noteDate}:${category}`,
-    );
     this.#sql.exec(
-      "INSERT INTO memory_notes_vault (date, category, content_enc, created_at) VALUES (?, ?, ?, ?)",
+      "INSERT INTO memory_notes (date, category, content, created_at) VALUES (?, ?, ?, ?)",
       noteDate,
       category,
-      encrypted,
+      content,
       now,
     );
     const idRow = this.#sql
@@ -112,40 +115,39 @@ export class MemoryStore {
     };
   }
 
-  async searchNotes(query: string, limit = 10): Promise<MemoryNote[]> {
+  searchNotes(query: string, limit = 10): MemoryNote[] {
     const clampedLimit = Math.max(1, Math.min(limit, 50));
-    const trimmed = query.trim().toLowerCase();
-    const rows = this.#sql
-      .exec<NoteRow>(
-        "SELECT id, date, category, content_enc, created_at FROM memory_notes_vault ORDER BY created_at DESC LIMIT 500",
-      )
-      .toArray();
-    const tokens = trimmed ? trimmed.split(/\s+/).filter(Boolean) : [];
-    const decrypted = await Promise.all(
-      rows.map(async (row): Promise<MemoryNote> => ({
-        id: row.id,
-        date: row.date,
-        category: row.category,
-        content: await this.#vault.decryptText(
-          row.content_enc,
-          `memory_notes:${row.date}:${row.category}`,
-        ),
-        createdAt: row.created_at,
-      })),
-    );
-    const filtered =
-      tokens.length === 0
-        ? decrypted
-        : decrypted.filter((note) => {
-            const haystack =
-              `${note.date} ${note.category} ${note.content}`.toLowerCase();
-            return tokens.every((token) => haystack.includes(token));
-          });
-    return filtered.slice(0, clampedLimit);
+    const ftsQuery = toFtsQuery(query);
+    const rows = ftsQuery
+      ? this.#sql
+          .exec<NoteRow>(
+            `SELECT n.id, n.date, n.category, n.content, n.created_at
+             FROM memory_notes_fts f
+             JOIN memory_notes n ON n.id = f.rowid
+             WHERE memory_notes_fts MATCH ?
+             ORDER BY n.created_at DESC
+             LIMIT ?`,
+            ftsQuery,
+            clampedLimit,
+          )
+          .toArray()
+      : this.#sql
+          .exec<NoteRow>(
+            "SELECT id, date, category, content, created_at FROM memory_notes ORDER BY created_at DESC LIMIT ?",
+            clampedLimit,
+          )
+          .toArray();
+    return rows.map((row) => ({
+      id: row.id,
+      date: row.date,
+      category: row.category,
+      content: row.content,
+      createdAt: row.created_at,
+    }));
   }
 
-  async renderProfileSummary(): Promise<string> {
-    const entries = await this.getProfile();
+  renderProfileSummary(): string {
+    const entries = this.getProfile();
     if (entries.length === 0) {
       return "No stored user profile facts yet.";
     }
@@ -179,7 +181,7 @@ export function createMemoryExtension(store: MemoryStore): Extension {
     parameters: EmptySchema,
     replay: "safe",
     async execute() {
-      return jsonToolResult({ entries: await store.getProfile() });
+      return jsonToolResult({ entries: store.getProfile() });
     },
   };
 
@@ -190,19 +192,19 @@ export function createMemoryExtension(store: MemoryStore): Extension {
     parameters: SetProfileSchema,
     replay: "safe",
     async execute({ key, value }) {
-      return jsonToolResult(await store.setProfileEntry(key, value));
+      return jsonToolResult(store.setProfileEntry(key, value));
     },
   };
 
   const writeNoteTool: ToolRegistration<typeof WriteNoteSchema> = {
     name: "memory_write_note",
     description:
-      "Save a dated encrypted note (trips, bookings, decisions, follow-ups) to long-term memory.",
+      "Save a dated note (trips, bookings, decisions, follow-ups) to long-term memory.",
     parameters: WriteNoteSchema,
     replay: "safe",
     async execute({ content, category, date }) {
       return jsonToolResult(
-        await store.addNote(content, category ?? "general", date),
+        store.addNote(content, category ?? "general", date),
       );
     },
   };
@@ -210,12 +212,12 @@ export function createMemoryExtension(store: MemoryStore): Extension {
   const searchMemoryTool: ToolRegistration<typeof SearchMemorySchema> = {
     name: "memory_search",
     description:
-      "Search encrypted dated memory notes for past trips, preferences, bookings, and facts.",
+      "Search dated memory notes for past trips, preferences, bookings, and facts.",
     parameters: SearchMemorySchema,
     replay: "safe",
     async execute({ query, limit }) {
       return jsonToolResult({
-        notes: await store.searchNotes(query, limit ?? 10),
+        notes: store.searchNotes(query, limit ?? 10),
       });
     },
   };

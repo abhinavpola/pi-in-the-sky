@@ -1,3 +1,8 @@
+import puppeteer, {
+  type Browser,
+  type BrowserWorker,
+  type Page,
+} from "@cloudflare/puppeteer";
 import {
   defineSignal,
   type Extension,
@@ -5,14 +10,10 @@ import {
   type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { bool, obj, opt, str } from "@earendil-works/pi-schema";
-import {
-  type TakeoverRecord,
-  TakeoverRecordSchema,
-} from "@pi-in-the-sky/client/protocol";
-import { err, ok } from "@pi-in-the-sky/result-monad";
+import type { TakeoverRecord } from "@pi-in-the-sky/client/protocol";
+import { err, ok, type Result } from "@pi-in-the-sky/result-monad";
 
 import { toToolResult } from "./http-tool";
-import type { VaultCipher } from "./vault";
 
 const TakeoverResumeSchema = obj({
   resumed: bool(),
@@ -38,123 +39,227 @@ type BrowserTakeoverRow = {
   id: string;
   task_id: TaskId;
   conversation_id: number;
-  payload_enc: string;
+  url: string;
+  live_view_url: string | null;
+  reason: string;
   status: TakeoverRecord["status"];
   created_at: number;
 };
 
-const TakeoverPayloadSchema = TakeoverRecordSchema.pick({
-  url: true,
-  liveViewUrl: true,
-  reason: true,
-});
-
 export class BrowserStore {
   readonly #sql: SqlStorage;
-  readonly #vault: VaultCipher;
 
-  constructor(sql: SqlStorage, vault: VaultCipher) {
+  constructor(sql: SqlStorage) {
     this.#sql = sql;
-    this.#vault = vault;
     this.#sql.exec(`
-      CREATE TABLE IF NOT EXISTS browser_takeovers_vault (
+      CREATE TABLE IF NOT EXISTS browser_takeovers (
         id TEXT PRIMARY KEY,
         task_id INTEGER NOT NULL,
         conversation_id INTEGER NOT NULL DEFAULT 0,
-        payload_enc TEXT NOT NULL,
+        url TEXT NOT NULL,
+        live_view_url TEXT,
+        reason TEXT NOT NULL,
         status TEXT NOT NULL,
         created_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS browser_session_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
       );
     `);
   }
 
-  async createTakeover(input: {
+  getSessionId(): string | undefined {
+    const row = this.#sql
+      .exec<{ value: string }>(
+        "SELECT value FROM browser_session_state WHERE key = 'session_id'",
+      )
+      .toArray()[0];
+    return row?.value;
+  }
+
+  setSessionId(sessionId: string): void {
+    this.#sql.exec(
+      `INSERT INTO browser_session_state (key, value) VALUES ('session_id', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      sessionId,
+    );
+  }
+
+  clearSessionId(): void {
+    this.#sql.exec(
+      "DELETE FROM browser_session_state WHERE key = 'session_id'",
+    );
+  }
+
+  createTakeover(input: {
     readonly id: string;
     readonly taskId: TaskId;
     readonly conversationId: number;
     readonly url: string;
     readonly liveViewUrl: string | null;
     readonly reason: string;
-  }): Promise<BrowserTakeoverRecord> {
+  }): BrowserTakeoverRecord {
     const createdAt = Date.now();
-    const encrypted = await this.#vault.encryptJson(
-      {
-        url: input.url,
-        liveViewUrl: input.liveViewUrl,
-        reason: input.reason,
-      },
-      `browser_takeovers:${input.id}`,
-    );
     this.#sql.exec(
-      `INSERT OR IGNORE INTO browser_takeovers_vault (
-        id, task_id, conversation_id, payload_enc, status, created_at
-      ) VALUES (?, ?, ?, ?, 'waiting', ?)`,
+      `INSERT OR IGNORE INTO browser_takeovers (
+        id, task_id, conversation_id, url, live_view_url, reason, status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'waiting', ?)`,
       input.id,
       Number(input.taskId),
       input.conversationId,
-      encrypted,
+      input.url,
+      input.liveViewUrl,
+      input.reason,
       createdAt,
     );
-    const created = await this.getTakeover(input.id);
+    const created = this.getTakeover(input.id);
     if (!created) {
       throw new Error(`Failed to persist browser takeover ${input.id}`);
     }
     return created;
   }
 
-  async #toTakeover(row: BrowserTakeoverRow): Promise<BrowserTakeoverRecord> {
-    const payload = await this.#vault.decryptJson(
-      row.payload_enc,
-      `browser_takeovers:${row.id}`,
-      TakeoverPayloadSchema,
-    );
+  #toTakeover(row: BrowserTakeoverRow): BrowserTakeoverRecord {
     return {
       id: row.id,
       taskId: row.task_id,
-      url: payload.url,
-      liveViewUrl: payload.liveViewUrl,
-      reason: payload.reason,
+      url: row.url,
+      liveViewUrl: row.live_view_url,
+      reason: row.reason,
       status: row.status,
       createdAt: row.created_at,
     };
   }
 
-  async getTakeover(id: string): Promise<BrowserTakeoverRecord | undefined> {
-    const rows = this.#sql
+  getTakeover(id: string): BrowserTakeoverRecord | undefined {
+    const row = this.#sql
       .exec<BrowserTakeoverRow>(
-        "SELECT id, task_id, conversation_id, payload_enc, status, created_at FROM browser_takeovers_vault WHERE id = ?",
+        "SELECT id, task_id, conversation_id, url, live_view_url, reason, status, created_at FROM browser_takeovers WHERE id = ?",
         id,
       )
-      .toArray();
-    const row = rows[0];
-    if (!row) {
-      return undefined;
-    }
-    return this.#toTakeover(row);
+      .toArray()[0];
+    return row ? this.#toTakeover(row) : undefined;
   }
 
-  async listWaitingTakeovers(): Promise<BrowserTakeoverRecord[]> {
-    const rows = this.#sql
+  listWaitingTakeovers(): BrowserTakeoverRecord[] {
+    return this.#sql
       .exec<BrowserTakeoverRow>(
-        "SELECT id, task_id, conversation_id, payload_enc, status, created_at FROM browser_takeovers_vault WHERE status = 'waiting' ORDER BY created_at ASC",
+        "SELECT id, task_id, conversation_id, url, live_view_url, reason, status, created_at FROM browser_takeovers WHERE status = 'waiting' ORDER BY created_at ASC",
       )
-      .toArray();
-    return Promise.all(rows.map((row) => this.#toTakeover(row)));
+      .toArray()
+      .map((row) => this.#toTakeover(row));
   }
 
   markResumed(id: string): void {
     this.#sql.exec(
-      "UPDATE browser_takeovers_vault SET status = 'resumed' WHERE id = ?",
+      "UPDATE browser_takeovers SET status = 'resumed' WHERE id = ?",
       id,
     );
   }
 
   clearWaitingTakeovers(conversationId: number): void {
     this.#sql.exec(
-      "UPDATE browser_takeovers_vault SET status = 'resumed' WHERE status = 'waiting' AND conversation_id = ?",
+      "UPDATE browser_takeovers SET status = 'resumed' WHERE status = 'waiting' AND conversation_id = ?",
       conversationId,
     );
   }
+}
+
+type BrowserActionRequest =
+  | { readonly action: "navigate"; readonly url: string }
+  | { readonly action: "snapshot"; readonly selector?: string }
+  | { readonly action: "click"; readonly selector: string }
+  | {
+      readonly action: "fill";
+      readonly selector: string;
+      readonly value: string;
+    };
+
+export type BrowserExecutor = (
+  req: BrowserActionRequest,
+) => Promise<Result<unknown, string>>;
+
+async function openOrReuseBrowser(
+  binding: BrowserWorker,
+  store: BrowserStore,
+): Promise<Browser> {
+  const existingId = store.getSessionId();
+  if (existingId) {
+    try {
+      return await puppeteer.connect(binding, existingId);
+    } catch {
+      store.clearSessionId();
+    }
+  }
+  const browser = await puppeteer.launch(binding, { keep_alive: 60_000 });
+  store.setSessionId(browser.sessionId());
+  return browser;
+}
+
+async function activePage(browser: Browser): Promise<Page> {
+  const pages = await browser.pages();
+  return pages[0] ?? browser.newPage();
+}
+
+export function createPuppeteerBrowserExecutor(
+  getBinding: () => BrowserWorker | undefined,
+  store: BrowserStore,
+): BrowserExecutor {
+  return async (req) => {
+    const binding = getBinding();
+    if (!binding) {
+      return err(
+        "Cloudflare Browser Rendering binding (BROWSER) is not available.",
+      );
+    }
+    let browser: Browser | undefined;
+    try {
+      browser = await openOrReuseBrowser(binding, store);
+      const page = await activePage(browser);
+      switch (req.action) {
+        case "navigate": {
+          await page.goto(req.url, { waitUntil: "domcontentloaded" });
+          return ok({ url: page.url(), title: await page.title() });
+        }
+        case "snapshot": {
+          const html = req.selector
+            ? await page.$eval(req.selector, (el) => el.textContent ?? "")
+            : await page.content();
+          const text = html
+            .replace(/<[^>]+>/g, " ")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 8000);
+          return ok({
+            url: page.url(),
+            title: await page.title(),
+            text,
+          });
+        }
+        case "click": {
+          await page.click(req.selector);
+          return ok({ clicked: req.selector, url: page.url() });
+        }
+        case "fill": {
+          await page.click(req.selector);
+          await page.type(req.selector, req.value);
+          return ok({ filled: req.selector, url: page.url() });
+        }
+        default: {
+          req satisfies never;
+          return err("Unknown browser action.");
+        }
+      }
+    } catch (thrown) {
+      return err(thrown instanceof Error ? thrown.message : String(thrown));
+    } finally {
+      if (browser) {
+        browser.disconnect();
+      }
+    }
+  };
 }
 
 const NavigateSchema = obj({
@@ -180,64 +285,28 @@ const RequestTakeoverSchema = obj({
   liveViewUrl: opt(str()),
 });
 
-type BrowserAction = "navigate" | "snapshot" | "click" | "fill";
-
 export function createBrowserExtension(
   store: BrowserStore,
-  getBrowser: () => Pick<Fetcher, "fetch"> | undefined,
-  sessionScope: string,
+  executeAction: BrowserExecutor,
   onTakeoverRequested: (record: BrowserTakeoverRecord) => void,
 ): Extension {
-  const runAction = async (
-    action: BrowserAction,
-    body: Record<string, unknown>,
-  ) => {
-    const browser = getBrowser();
-    if (!browser) {
-      return toToolResult(
-        err("Cloudflare Browser Rendering binding (BROWSER) is not available."),
-      );
-    }
-    try {
-      const response = await browser.fetch(
-        `https://browser.internal/${action}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Agent-Session": sessionScope,
-          },
-          body: JSON.stringify(body),
-        },
-      );
-      const text = await response.text();
-      if (!response.ok) {
-        return toToolResult(err(`Browser error (${response.status}): ${text}`));
-      }
-      return toToolResult(ok<unknown>(text ? JSON.parse(text) : {}));
-    } catch (thrown) {
-      return toToolResult(
-        err(thrown instanceof Error ? thrown.message : String(thrown)),
-      );
-    }
-  };
-
   const navigateTool: ToolRegistration<typeof NavigateSchema> = {
     name: "browser_navigate",
     description: "Navigate the cloud browser session to a URL.",
     parameters: NavigateSchema,
     replay: "safe",
-    execute: ({ url }) => runAction("navigate", { url }),
+    execute: async ({ url }) =>
+      toToolResult(await executeAction({ action: "navigate", url })),
   };
 
   const snapshotTool: ToolRegistration<typeof SnapshotSchema> = {
     name: "browser_snapshot",
     description:
-      "Capture a structured accessibility/text snapshot of the current browser page.",
+      "Capture a structured text snapshot of the current browser page.",
     parameters: SnapshotSchema,
     replay: "safe",
-    execute: ({ selector }) =>
-      runAction("snapshot", selector ? { selector } : {}),
+    execute: async ({ selector }) =>
+      toToolResult(await executeAction({ action: "snapshot", selector })),
   };
 
   const clickTool: ToolRegistration<typeof ClickSchema> = {
@@ -245,7 +314,8 @@ export function createBrowserExtension(
     description: "Click an element on the current browser page by selector.",
     parameters: ClickSchema,
     replay: "unsafe",
-    execute: ({ selector }) => runAction("click", { selector }),
+    execute: async ({ selector }) =>
+      toToolResult(await executeAction({ action: "click", selector })),
   };
 
   const fillTool: ToolRegistration<typeof FillSchema> = {
@@ -253,7 +323,8 @@ export function createBrowserExtension(
     description: "Fill an input field on the current browser page.",
     parameters: FillSchema,
     replay: "unsafe",
-    execute: ({ selector, value }) => runAction("fill", { selector, value }),
+    execute: async ({ selector, value }) =>
+      toToolResult(await executeAction({ action: "fill", selector, value })),
   };
 
   const requestTakeoverTool: ToolRegistration<
@@ -294,7 +365,7 @@ export function createBrowserExtension(
         };
       }
       const takeoverId = api.callId;
-      const record = await store.createTakeover({
+      const record = store.createTakeover({
         id: takeoverId,
         taskId: api.taskId,
         conversationId: Number(api.conversationId),

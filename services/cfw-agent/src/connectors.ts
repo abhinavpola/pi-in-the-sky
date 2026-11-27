@@ -1,91 +1,74 @@
 import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { num, obj, opt, str } from "@earendil-works/pi-schema";
 import type { ConnectorProvider } from "@pi-in-the-sky/client/protocol";
-import { z } from "zod";
 
 import {
   fetchJsonWithBearer,
   type HttpFetcher,
   toToolResult,
 } from "./http-tool";
-import { toBase64, type VaultCipher } from "./vault";
 
 const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
 const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3";
 
-type TokenRow = {
-  provider: string;
-  payload_enc: string;
-  updated_at: number;
-};
+function toBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
 
-const StoredTokenPayloadSchema = z.object({
-  accessToken: z.string().min(1),
-  refreshToken: z.string().nullable(),
-  expiresAt: z.number().nullable(),
-});
+type TokenRow = {
+  access_token: string;
+};
 
 export class ConnectorStore {
   readonly #sql: SqlStorage;
-  readonly #vault: VaultCipher;
 
-  constructor(sql: SqlStorage, vault: VaultCipher) {
+  constructor(sql: SqlStorage) {
     this.#sql = sql;
-    this.#vault = vault;
     this.#sql.exec(`
-      CREATE TABLE IF NOT EXISTS connector_tokens_vault (
+      CREATE TABLE IF NOT EXISTS connector_tokens (
         provider TEXT PRIMARY KEY,
-        payload_enc TEXT NOT NULL,
+        access_token TEXT NOT NULL,
+        refresh_token TEXT,
+        expires_at INTEGER,
         updated_at INTEGER NOT NULL
       );
     `);
   }
 
-  async setToken(
+  setToken(
     provider: ConnectorProvider,
     accessToken: string,
     refreshToken?: string,
     expiresAt?: number,
-  ): Promise<void> {
-    const encrypted = await this.#vault.encryptJson(
-      {
-        accessToken,
-        refreshToken: refreshToken ?? null,
-        expiresAt: expiresAt ?? null,
-      },
-      `connector_tokens:${provider}`,
-    );
+  ): void {
     this.#sql.exec(
-      `INSERT INTO connector_tokens_vault (provider, payload_enc, updated_at)
-       VALUES (?, ?, ?)
+      `INSERT INTO connector_tokens (provider, access_token, refresh_token, expires_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(provider) DO UPDATE SET
-         payload_enc = excluded.payload_enc,
+         access_token = excluded.access_token,
+         refresh_token = excluded.refresh_token,
+         expires_at = excluded.expires_at,
          updated_at = excluded.updated_at`,
       provider,
-      encrypted,
+      accessToken,
+      refreshToken ?? null,
+      expiresAt ?? null,
       Date.now(),
     );
   }
 
-  async getAccessToken(
-    provider: ConnectorProvider,
-  ): Promise<string | undefined> {
-    const rows = this.#sql
+  getAccessToken(provider: ConnectorProvider): string | undefined {
+    const row = this.#sql
       .exec<TokenRow>(
-        "SELECT provider, payload_enc, updated_at FROM connector_tokens_vault WHERE provider = ?",
+        "SELECT access_token FROM connector_tokens WHERE provider = ?",
         provider,
       )
-      .toArray();
-    const row = rows[0];
-    if (!row) {
-      return undefined;
-    }
-    const parsed = await this.#vault.decryptJson(
-      row.payload_enc,
-      `connector_tokens:${provider}`,
-      StoredTokenPayloadSchema,
-    );
-    return parsed.accessToken;
+      .toArray()[0];
+    return row?.access_token;
   }
 }
 
@@ -122,9 +105,8 @@ export function createConnectorsExtension(
   store: ConnectorStore,
   fetcher: HttpFetcher = (input, init) => fetch(input, init),
 ): Extension {
-  const resolveToken = (
-    provider: ConnectorProvider,
-  ): Promise<string | undefined> => store.getAccessToken(provider);
+  const resolveToken = (provider: ConnectorProvider): string | undefined =>
+    store.getAccessToken(provider);
 
   const gmailBase = () => GMAIL_API_BASE;
   const calendarBase = () => CALENDAR_API_BASE;

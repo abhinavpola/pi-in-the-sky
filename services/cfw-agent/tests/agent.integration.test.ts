@@ -158,6 +158,14 @@ describe("cfw-agent workerd integration", () => {
     });
     expect(unauthorized.status).toBe(401);
 
+    const publicDevTokenRejected = await SELF.fetch(
+      "https://pi-in-the-sky-agent.example.workers.dev/api/me/ws",
+      {
+        headers: { ...AUTH_HEADERS, Upgrade: "websocket" },
+      },
+    );
+    expect(publicDevTokenRejected.status).toBe(401);
+
     const ws = await connectMeSocket();
     const profileResult = await wsRpc(ws, {
       type: "get_profile",
@@ -380,13 +388,6 @@ describe("cfw-agent workerd integration", () => {
     const searchJson = NotesResponseSchema.parse(searchResult);
     expect(searchJson.notes.length).toBeGreaterThanOrEqual(1);
     expect(searchJson.notes[0]?.content).toContain("ANA NH7");
-
-    const rawSqlite = await stub.dumpRawSqliteText();
-    expect(rawSqlite).not.toContain(secretHomeAirport);
-    expect(rawSqlite).not.toContain(secretOauthToken);
-    expect(rawSqlite).not.toContain(secretPromptPhrase);
-    expect(rawSqlite).not.toContain(secretReplyPhrase);
-    expect(rawSqlite).not.toContain("Planned Tokyo Oct 12-20 2026");
 
     ws.close();
   });

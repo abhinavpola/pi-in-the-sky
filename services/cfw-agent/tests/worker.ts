@@ -1,6 +1,8 @@
 import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
+import { ok } from "@pi-in-the-sky/result-monad";
 import type { PiModel } from "agents/harness/pi";
 
+import type { BrowserExecutor } from "../src/browser";
 import type { HttpFetcher } from "../src/http-tool";
 import worker, { PersonalAgent } from "../src/index";
 import {
@@ -17,22 +19,6 @@ export class TestPersonalAgent extends PersonalAgent {
   setScript(key: string, turns: ScriptedTurn[]): void {
     this.#scriptKey = key;
     scriptedQueues.set(key, [...turns]);
-  }
-
-  dumpRawSqliteText(): string {
-    const tables = this.ctx.storage.sql
-      .exec<{ name: string }>(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'",
-      )
-      .toArray();
-    const chunks: string[] = [];
-    for (const table of tables) {
-      const rows = this.ctx.storage.sql
-        .exec(`SELECT * FROM "${table.name}"`)
-        .toArray();
-      chunks.push(`${table.name}:${JSON.stringify(rows)}`);
-    }
-    return chunks.join("\n");
   }
 
   protected override createModelRegistry(): { models: MutableModels } {
@@ -54,16 +40,34 @@ export class TestPersonalAgent extends PersonalAgent {
     return STUB_MODEL;
   }
 
-  protected override resolveBrowserBinding(): Pick<Fetcher, "fetch"> {
-    const fetcher = this.createFetcher();
-    return {
-      fetch: (input: RequestInfo | URL, init?: RequestInit) =>
-        fetcher(input, init),
+  protected override createBrowserExecutor(): BrowserExecutor {
+    return async (req) => {
+      switch (req.action) {
+        case "navigate":
+          return ok({
+            ok: true,
+            title: "ANA Flights - SFO to NRT",
+            url: req.url,
+          });
+        case "snapshot":
+          return ok({
+            ok: true,
+            text: "ANA NH7 nonstop SFO -> NRT Oct 12-20, 2026. Economy Window: $1,120 total.",
+          });
+        case "click":
+          return ok({ clicked: req.selector });
+        case "fill":
+          return ok({ filled: req.selector });
+        default: {
+          req satisfies never;
+          return ok({});
+        }
+      }
     };
   }
 
   protected override createFetcher(): HttpFetcher {
-    return async (input, init) => {
+    return async (input) => {
       const url =
         typeof input === "string"
           ? input
@@ -114,22 +118,6 @@ export class TestPersonalAgent extends PersonalAgent {
               end: { dateTime: "2026-10-08T11:00:00Z" },
             },
           ],
-        });
-      }
-
-      if (url === "https://browser.internal/navigate") {
-        const body = typeof init?.body === "string" ? init.body : "{}";
-        return Response.json({
-          ok: true,
-          title: "ANA Flights - SFO to NRT",
-          echo: JSON.parse(body),
-        });
-      }
-
-      if (url === "https://browser.internal/snapshot") {
-        return Response.json({
-          ok: true,
-          text: "ANA NH7 nonstop SFO -> NRT Oct 12-20, 2026. Economy Window: $1,120 total.",
         });
       }
 

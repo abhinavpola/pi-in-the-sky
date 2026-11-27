@@ -378,29 +378,21 @@ export async function provisionWorkerSecrets(
     Authorization: `Bearer ${cfApiToken.trim()}`,
     "Content-Type": "application/json",
   };
-  const secrets = [
-    {
-      name: "VAULT_MASTER_KEY",
-      text: randomBase64Url(32),
-      type: "secret_text",
-    },
-    { name: "NEARAI_API_KEY", text: nearAiApiKey.trim(), type: "secret_text" },
-  ];
+  const secret = {
+    name: "NEARAI_API_KEY",
+    text: nearAiApiKey.trim(),
+    type: "secret_text",
+  };
   try {
-    const responses = await Promise.all(
-      secrets.map((secret) =>
-        fetch(endpoint, {
-          method: "PUT",
-          headers,
-          body: JSON.stringify(secret),
-        }),
-      ),
-    );
-    const failed = responses.find((res) => !res.ok);
-    if (failed) {
+    const response = await fetch(endpoint, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify(secret),
+    });
+    if (!response.ok) {
       return {
         ok: false,
-        error: `Cloudflare secrets API returned HTTP ${failed.status}`,
+        error: `Cloudflare secrets API returned HTTP ${response.status}`,
       };
     }
     return { ok: true };

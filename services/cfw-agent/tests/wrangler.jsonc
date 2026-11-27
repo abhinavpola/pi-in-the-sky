@@ -1,11 +1,9 @@
 {
+  "$schema": "../node_modules/wrangler/config-schema.json",
   "name": "pi-in-the-sky-agent-test",
   "main": "./worker.ts",
-  "compatibility_date": "2026-11-27",
+  "compatibility_date": "2026-03-01",
   "compatibility_flags": ["nodejs_compat"],
-  "vars": {
-    "VAULT_MASTER_KEY": "test-vault-master-key-32-bytes-minimum",
-  },
   "durable_objects": {
     "bindings": [
       {

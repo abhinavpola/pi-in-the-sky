@@ -2,67 +2,57 @@ import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { obj, opt, str } from "@earendil-works/pi-schema";
 import {
   type ActivityRecord,
-  ActivityRecordSchema,
   type ActivityStatus,
 } from "@pi-in-the-sky/client/protocol";
 import type { PiHarness, PiSessionId } from "agents/harness/pi";
 
 import { errorToolResult, jsonToolResult } from "./http-tool";
-import type { VaultCipher } from "./vault";
 
 type ActivityRow = {
   id: string;
   session_id: string;
+  title: string;
+  summary: string;
   status: ActivityStatus;
   collapsed: number;
-  payload_enc: string;
   created_at: number;
   updated_at: number;
 };
 
-const ActivityPayloadSchema = ActivityRecordSchema.pick({
-  title: true,
-  summary: true,
-});
-
 export class ActivityStore {
   readonly #sql: SqlStorage;
-  readonly #vault: VaultCipher;
 
-  constructor(sql: SqlStorage, vault: VaultCipher) {
+  constructor(sql: SqlStorage) {
     this.#sql = sql;
-    this.#vault = vault;
     this.#sql.exec(`
-      CREATE TABLE IF NOT EXISTS activities_vault (
+      CREATE TABLE IF NOT EXISTS activities (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
         status TEXT NOT NULL,
         collapsed INTEGER NOT NULL,
-        payload_enc TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
     `);
   }
 
-  async createActivity(input: {
+  createActivity(input: {
     readonly id: string;
     readonly sessionId: PiSessionId;
     readonly title: string;
     readonly summary: string;
-  }): Promise<ActivityRecord> {
+  }): ActivityRecord {
     const now = Date.now();
-    const encrypted = await this.#vault.encryptJson(
-      { title: input.title, summary: input.summary },
-      `activities:${input.id}`,
-    );
     this.#sql.exec(
-      `INSERT INTO activities_vault (
-        id, session_id, status, collapsed, payload_enc, created_at, updated_at
-      ) VALUES (?, ?, 'running', 0, ?, ?, ?)`,
+      `INSERT INTO activities (
+        id, session_id, title, summary, status, collapsed, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'running', 0, ?, ?)`,
       input.id,
       input.sessionId,
-      encrypted,
+      input.title,
+      input.summary,
       now,
       now,
     );
@@ -78,17 +68,12 @@ export class ActivityStore {
     };
   }
 
-  async #toRecord(row: ActivityRow): Promise<ActivityRecord> {
-    const payload = await this.#vault.decryptJson(
-      row.payload_enc,
-      `activities:${row.id}`,
-      ActivityPayloadSchema,
-    );
+  #toRecord(row: ActivityRow): ActivityRecord {
     return {
       id: row.id,
       sessionId: row.session_id,
-      title: payload.title,
-      summary: payload.summary,
+      title: row.title,
+      summary: row.summary,
       status: row.status,
       collapsed: row.collapsed === 1,
       createdAt: row.created_at,
@@ -96,39 +81,36 @@ export class ActivityStore {
     };
   }
 
-  async getActivity(id: string): Promise<ActivityRecord | undefined> {
+  getActivity(id: string): ActivityRecord | undefined {
     const row = this.#sql
       .exec<ActivityRow>(
-        "SELECT id, session_id, status, collapsed, payload_enc, created_at, updated_at FROM activities_vault WHERE id = ?",
+        "SELECT id, session_id, title, summary, status, collapsed, created_at, updated_at FROM activities WHERE id = ?",
         id,
       )
       .toArray()[0];
-    if (!row) {
-      return undefined;
-    }
-    return this.#toRecord(row);
+    return row ? this.#toRecord(row) : undefined;
   }
 
-  async listActivities(limit = 50): Promise<ActivityRecord[]> {
+  listActivities(limit = 50): ActivityRecord[] {
     const clamped = Math.max(1, Math.min(limit, 100));
-    const rows = this.#sql
+    return this.#sql
       .exec<ActivityRow>(
-        "SELECT id, session_id, status, collapsed, payload_enc, created_at, updated_at FROM activities_vault ORDER BY updated_at DESC LIMIT ?",
+        "SELECT id, session_id, title, summary, status, collapsed, created_at, updated_at FROM activities ORDER BY updated_at DESC LIMIT ?",
         clamped,
       )
-      .toArray();
-    return Promise.all(rows.map((row) => this.#toRecord(row)));
+      .toArray()
+      .map((row) => this.#toRecord(row));
   }
 
-  async updateActivity(
+  updateActivity(
     id: string,
     patch: {
       readonly status?: ActivityStatus;
       readonly summary?: string;
       readonly collapsed?: boolean;
     },
-  ): Promise<ActivityRecord | undefined> {
-    const existing = await this.getActivity(id);
+  ): ActivityRecord | undefined {
+    const existing = this.getActivity(id);
     if (!existing) {
       return undefined;
     }
@@ -136,17 +118,13 @@ export class ActivityStore {
     const nextSummary = patch.summary ?? existing.summary;
     const nextCollapsed = patch.collapsed ?? existing.collapsed;
     const now = Date.now();
-    const encrypted = await this.#vault.encryptJson(
-      { title: existing.title, summary: nextSummary },
-      `activities:${id}`,
-    );
     this.#sql.exec(
-      `UPDATE activities_vault
-       SET status = ?, collapsed = ?, payload_enc = ?, updated_at = ?
+      `UPDATE activities
+       SET status = ?, summary = ?, collapsed = ?, updated_at = ?
        WHERE id = ?`,
       nextStatus,
+      nextSummary,
       nextCollapsed ? 1 : 0,
-      encrypted,
       now,
       id,
     );
@@ -159,8 +137,8 @@ export class ActivityStore {
     };
   }
 
-  async renderActivitiesSummary(): Promise<string> {
-    const activities = await this.listActivities(15);
+  renderActivitiesSummary(): string {
+    const activities = this.listActivities(15);
     if (activities.length === 0) {
       return "No background activities yet.";
     }

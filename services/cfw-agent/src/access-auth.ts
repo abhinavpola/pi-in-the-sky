@@ -1,6 +1,13 @@
 import { z } from "zod";
 
-import { fromBase64 } from "./vault";
+function fromBase64(encoded: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(new ArrayBuffer(binary.length));
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
 
 type AccessConfig = {
   readonly teamDomain?: string;

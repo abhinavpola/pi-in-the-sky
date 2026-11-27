@@ -132,6 +132,7 @@ export class AgentSockets {
   readonly #harness: PiHarness;
   readonly #registry: RegistryReader;
   readonly #getWebSockets: (tag?: string) => WebSocket[];
+  readonly #getTags: (socket: WebSocket) => readonly string[];
   readonly #callbacks: SocketCallbacks;
   readonly #watches = new Map<WebSocket, ConversationWatch>();
 
@@ -139,12 +140,41 @@ export class AgentSockets {
     harness: PiHarness,
     registry: RegistryReader,
     getWebSockets: (tag?: string) => WebSocket[],
+    getTags: (socket: WebSocket) => readonly string[],
     callbacks: SocketCallbacks,
   ) {
     this.#harness = harness;
     this.#registry = registry;
     this.#getWebSockets = getWebSockets;
+    this.#getTags = getTags;
     this.#callbacks = callbacks;
+  }
+
+  #isExpired(socket: WebSocket, tags?: readonly string[]): boolean {
+    const tokenExpSec = expFromTags(tags ?? this.#getTags(socket));
+    return tokenExpSec !== null && Date.now() / 1000 >= tokenExpSec;
+  }
+
+  #expireSocket(socket: WebSocket): void {
+    send(socket, {
+      type: "error",
+      message: "Access token expired; reconnect with a fresh token.",
+    });
+    void this.#unwatch(socket);
+    try {
+      socket.close(4401, "Access token expired");
+    } catch {
+      return;
+    }
+  }
+
+  #sendIfActive(socket: WebSocket, message: ServerMessage): boolean {
+    if (this.#isExpired(socket)) {
+      this.#expireSocket(socket);
+      return false;
+    }
+    send(socket, message);
+    return true;
   }
 
   options(): WebSocketsOptions {
@@ -175,7 +205,7 @@ export class AgentSockets {
       takeover,
     };
     for (const socket of this.#getWebSockets()) {
-      send(socket, message);
+      this.#sendIfActive(socket, message);
     }
   }
 
@@ -185,7 +215,7 @@ export class AgentSockets {
       activity,
     };
     for (const socket of this.#getWebSockets()) {
-      send(socket, message);
+      this.#sendIfActive(socket, message);
     }
   }
 
@@ -245,7 +275,9 @@ export class AgentSockets {
     this.#watches.set(socket, watch);
     void previous?.stop();
     let last = watch.value;
-    send(socket, { type: "view", view: last });
+    if (!this.#sendIfActive(socket, { type: "view", view: last })) {
+      return;
+    }
     watch.start(async (call) => {
       if (call.kind !== "value") {
         return;
@@ -255,7 +287,7 @@ export class AgentSockets {
         return;
       }
       last = call.value;
-      send(socket, { type: "view", view: call.value });
+      this.#sendIfActive(socket, { type: "view", view: call.value });
     });
     void watch.closed.then((end) =>
       this.#ended(socket, session, watch, end, last),
@@ -305,18 +337,8 @@ export class AgentSockets {
     connection: Connection,
     message: WebSocketMessage,
   ): Promise<void> {
-    const tokenExpSec = expFromTags(connection.tags);
-    if (tokenExpSec !== null && Date.now() / 1000 >= tokenExpSec) {
-      send(connection, {
-        type: "error",
-        message: "Access token expired; reconnect with a fresh token.",
-      });
-      await this.#unwatch(connection);
-      try {
-        connection.close(4401, "Access token expired");
-      } catch {
-        return;
-      }
+    if (this.#isExpired(connection, connection.tags)) {
+      this.#expireSocket(connection);
       return;
     }
     if (typeof message !== "string") {

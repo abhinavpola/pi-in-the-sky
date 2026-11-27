@@ -150,7 +150,13 @@ function parseMemoryNote(raw: unknown): MemoryNote | null {
   const category = readString(raw, "category");
   const content = readString(raw, "content");
   const createdAt = readNumber(raw, "createdAt");
-  if (id === null || !date || !category || !content || createdAt === null) {
+  if (
+    id === null ||
+    date === null ||
+    category === null ||
+    content === null ||
+    createdAt === null
+  ) {
     return null;
   }
   return { id, date, category, content, createdAt };

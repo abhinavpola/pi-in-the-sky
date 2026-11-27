@@ -24,17 +24,15 @@ import {
 
 import { signInWithCloudflareAccess } from "../native";
 import { THEME } from "../theme";
+import { type OnboardingStep, OnboardingStepper } from "./OnboardingStepper";
 import { onboardingStyles } from "./OnboardingView.styles";
-
-type OnboardingStep =
-  "connect" | "cf_verify" | "select_account" | "deploy" | "access_login";
 
 type OnboardingViewProps = {
   readonly onComplete: (config: ConnectionConfig) => void;
 };
 
 export function OnboardingView({ onComplete }: OnboardingViewProps) {
-  const [step, setStep] = useState<OnboardingStep>("connect");
+  const [step, setStep] = useState<OnboardingStep>("cf_connect");
   const [nearAiApiKey, setNearAiApiKey] = useState("");
   const [cfAccessToken, setCfAccessToken] = useState("");
   const [deviceAuth, setDeviceAuth] = useState<CloudflareDeviceAuth | null>(
@@ -43,6 +41,9 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
   const [matchedWorkers, setMatchedWorkers] = useState<
     readonly DiscoveredWorker[]
   >([]);
+  const [selectedWorker, setSelectedWorker] = useState<DiscoveredWorker | null>(
+    null,
+  );
   const [workerUrl, setWorkerUrl] = useState("");
   const [teamDomain, setTeamDomain] = useState("");
   const [clientId, setClientId] = useState("");
@@ -70,12 +71,13 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
       case "offline":
         setStatusMessage(null);
         setErrorText(status.reason);
-        setStep("deploy");
+        setStep("cf_deploy");
         return;
       case "live_no_oauth":
         setCfAccessToken("");
         setNearAiApiKey("");
         setMatchedWorkers([]);
+        setSelectedWorker(null);
         setStatusMessage(null);
         onComplete({
           baseUrl: status.baseUrl,
@@ -86,6 +88,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
         setCfAccessToken("");
         setNearAiApiKey("");
         setMatchedWorkers([]);
+        setSelectedWorker(null);
         setWorkerUrl(status.baseUrl);
         setTeamDomain(status.teamDomain);
         setClientId(status.clientId);
@@ -98,40 +101,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
     }
   };
 
-  const configureWorker = async (
-    token: string,
-    target: DiscoveredWorker,
-    epoch: number,
-  ) => {
-    if (flowEpochRef.current !== epoch || configuringRef.current) {
-      return;
-    }
-    configuringRef.current = true;
-    try {
-      setErrorText(null);
-      setStatusMessage("Configuring...");
-      const provisioned = await provisionWorkerSecrets(
-        token,
-        target.accountId,
-        nearAiApiKey,
-      );
-      if (flowEpochRef.current !== epoch) {
-        return;
-      }
-      if (!provisioned.ok) {
-        setStatusMessage(null);
-        setErrorText(provisioned.error);
-        setStep("connect");
-        return;
-      }
-      setWorkerUrl(target.baseUrl);
-      await verifyLiveWorker(target.baseUrl, epoch);
-    } finally {
-      configuringRef.current = false;
-    }
-  };
-
-  const discoverAndConfigure = async (token: string, epoch: number) => {
+  const discoverWorker = async (token: string, epoch: number) => {
     if (flowEpochRef.current !== epoch) {
       return;
     }
@@ -149,22 +119,26 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
           discovery.matches.length === 1 &&
           single
         ) {
-          await configureWorker(token, single, epoch);
+          setSelectedWorker(single);
+          setMatchedWorkers([]);
+          setStatusMessage(null);
+          setStep("provider");
           return;
         }
         setMatchedWorkers(discovery.matches);
+        setSelectedWorker(null);
         setStatusMessage(null);
-        setStep("select_account");
+        setStep("cf_select_account");
         return;
       }
       case "not_deployed":
         setStatusMessage(null);
-        setStep("deploy");
+        setStep("cf_deploy");
         return;
       case "error":
         setStatusMessage(null);
         setErrorText(discovery.message);
-        setStep("connect");
+        setStep("cf_connect");
         return;
       default: {
         discovery satisfies never;
@@ -173,8 +147,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
   };
 
   const handleSignInWithCloudflare = async () => {
-    if (!nearAiApiKey.trim()) {
-      setErrorText("Enter your NEAR AI key to continue.");
+    if (statusMessage !== null) {
       return;
     }
     flowEpochRef.current += 1;
@@ -208,11 +181,49 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
     if (!polled.ok) {
       setStatusMessage(null);
       setErrorText(polled.error);
-      setStep("connect");
+      setStep("cf_connect");
       return;
     }
     setCfAccessToken(polled.accessToken);
-    await discoverAndConfigure(polled.accessToken, epoch);
+    await discoverWorker(polled.accessToken, epoch);
+  };
+
+  const handleConfigureProvider = async () => {
+    if (!nearAiApiKey.trim()) {
+      setErrorText("Enter your NEAR AI key to continue.");
+      return;
+    }
+    if (!selectedWorker || !cfAccessToken) {
+      setErrorText("Sign in with Cloudflare first.");
+      setStep("cf_connect");
+      return;
+    }
+    if (configuringRef.current) {
+      return;
+    }
+    const epoch = flowEpochRef.current;
+    configuringRef.current = true;
+    try {
+      setErrorText(null);
+      setStatusMessage("Configuring...");
+      const provisioned = await provisionWorkerSecrets(
+        cfAccessToken,
+        selectedWorker.accountId,
+        nearAiApiKey,
+      );
+      if (flowEpochRef.current !== epoch) {
+        return;
+      }
+      if (!provisioned.ok) {
+        setStatusMessage(null);
+        setErrorText(provisioned.error);
+        return;
+      }
+      setWorkerUrl(selectedWorker.baseUrl);
+      await verifyLiveWorker(selectedWorker.baseUrl, epoch);
+    } finally {
+      configuringRef.current = false;
+    }
   };
 
   const handleCancelFlow = () => {
@@ -220,11 +231,13 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
     configuringRef.current = false;
     pollAbortRef.current?.abort();
     pollAbortRef.current = null;
+    setCfAccessToken("");
     setDeviceAuth(null);
     setMatchedWorkers([]);
+    setSelectedWorker(null);
     setStatusMessage(null);
     setErrorText(null);
-    setStep("connect");
+    setStep("cf_connect");
   };
 
   const handleOpenDeploy = async () => {
@@ -251,22 +264,16 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
 
   const renderStep = (current: OnboardingStep) => {
     switch (current) {
-      case "connect":
+      case "cf_connect":
         return (
           <View style={onboardingStyles.card}>
-            <View style={onboardingStyles.field}>
-              <Text style={onboardingStyles.label}>NEAR AI Key</Text>
-              <TextInput
-                style={onboardingStyles.input}
-                value={nearAiApiKey}
-                onChangeText={setNearAiApiKey}
-                secureTextEntry
-                placeholder="sk-..."
-                placeholderTextColor={THEME.textTertiary}
-              />
-            </View>
+            <Text style={onboardingStyles.cardTitle}>Cloudflare</Text>
+            <Text style={onboardingStyles.cardBody}>
+              Sign in to connect or deploy your personal Worker.
+            </Text>
             <Pressable
               style={onboardingStyles.primaryButton}
+              disabled={statusMessage !== null}
               onPress={() => {
                 void handleSignInWithCloudflare();
               }}
@@ -311,12 +318,12 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
             </Pressable>
           </View>
         );
-      case "select_account":
+      case "cf_select_account":
         return (
           <View style={onboardingStyles.card}>
             <Text style={onboardingStyles.cardTitle}>Choose Account</Text>
             <Text style={onboardingStyles.cardBody}>
-              Confirm which Cloudflare account should receive your NEAR AI key.
+              Select which Cloudflare account to use.
             </Text>
             <ScrollView
               style={onboardingStyles.accountList}
@@ -326,10 +333,10 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
                 <Pressable
                   key={match.accountId}
                   style={onboardingStyles.accountOption}
-                  disabled={statusMessage !== null}
                   onPress={() => {
-                    const epoch = flowEpochRef.current;
-                    void configureWorker(cfAccessToken, match, epoch);
+                    setErrorText(null);
+                    setSelectedWorker(match);
+                    setStep("provider");
                   }}
                 >
                   <Text style={onboardingStyles.accountName}>
@@ -349,7 +356,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
             </Pressable>
           </View>
         );
-      case "deploy":
+      case "cf_deploy":
         return (
           <View style={onboardingStyles.card}>
             <Text style={onboardingStyles.cardTitle}>Deploy to Cloudflare</Text>
@@ -368,10 +375,11 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
             </Pressable>
             <Pressable
               style={onboardingStyles.secondaryButton}
+              disabled={statusMessage !== null}
               onPress={() => {
                 flowEpochRef.current += 1;
                 const epoch = flowEpochRef.current;
-                void discoverAndConfigure(cfAccessToken, epoch);
+                void discoverWorker(cfAccessToken, epoch);
               }}
             >
               <Text style={onboardingStyles.secondaryButtonText}>Continue</Text>
@@ -379,6 +387,51 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
             <Pressable
               style={onboardingStyles.localLink}
               onPress={handleCancelFlow}
+            >
+              <Text style={onboardingStyles.localText}>Back</Text>
+            </Pressable>
+          </View>
+        );
+      case "provider":
+        return (
+          <View style={onboardingStyles.card}>
+            <Text style={onboardingStyles.cardTitle}>Inference Provider</Text>
+            <Text style={onboardingStyles.cardBody}>
+              Add your NEAR AI key for{" "}
+              {selectedWorker?.accountName ?? "Cloudflare"}.
+            </Text>
+            <View style={onboardingStyles.field}>
+              <Text style={onboardingStyles.label}>NEAR AI Key</Text>
+              <TextInput
+                style={onboardingStyles.input}
+                value={nearAiApiKey}
+                onChangeText={setNearAiApiKey}
+                secureTextEntry
+                placeholder="sk-..."
+                placeholderTextColor={THEME.textTertiary}
+              />
+            </View>
+            <Pressable
+              style={onboardingStyles.primaryButton}
+              disabled={statusMessage !== null}
+              onPress={() => {
+                void handleConfigureProvider();
+              }}
+            >
+              <Text style={onboardingStyles.primaryButtonText}>Continue</Text>
+            </Pressable>
+            <Pressable
+              style={onboardingStyles.localLink}
+              disabled={statusMessage !== null}
+              onPress={() => {
+                setErrorText(null);
+                if (matchedWorkers.length > 0) {
+                  setSelectedWorker(null);
+                  setStep("cf_select_account");
+                  return;
+                }
+                handleCancelFlow();
+              }}
             >
               <Text style={onboardingStyles.localText}>Back</Text>
             </Pressable>
@@ -417,6 +470,8 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
             Set up your personal assistant
           </Text>
         </View>
+
+        <OnboardingStepper step={step} />
 
         {renderStep(step)}
 

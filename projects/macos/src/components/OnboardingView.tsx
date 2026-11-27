@@ -12,11 +12,10 @@ import {
   fetchWorkerStatus,
   provisionWorkerSecrets,
 } from "@pi-in-the-sky/client/onboarding";
-import { LOCAL_DEV_AUTH_TOKEN } from "@pi-in-the-sky/client/protocol";
 import { useEffect, useRef, useState } from "react";
 import { Linking, Pressable, Text, TextInput, View } from "react-native";
 
-import { signInWithCloudflareAccess } from "../native";
+import { generateRandomToken, signInWithCloudflareAccess } from "../native";
 import { THEME } from "../theme";
 import {
   DeployWorkerCard,
@@ -71,7 +70,11 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
     setStatusMessage(null);
   };
 
-  const verifyLiveWorker = async (candidateUrl: string, epoch: number) => {
+  const verifyLiveWorker = async (
+    candidateUrl: string,
+    epoch: number,
+    agentAuthToken: string,
+  ) => {
     setStatusMessage("Connecting...");
     const status = await fetchWorkerStatus(candidateUrl);
     if (flowEpochRef.current !== epoch) {
@@ -86,7 +89,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
         clearSetupState();
         onComplete({
           baseUrl: status.baseUrl,
-          authToken: LOCAL_DEV_AUTH_TOKEN,
+          authToken: agentAuthToken,
         });
         return;
       case "live_oauth_ready":
@@ -247,10 +250,20 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
     try {
       setErrorText(null);
       setStatusMessage("Configuring...");
+      const tokenRes = await generateRandomToken(32);
+      if (flowEpochRef.current !== epoch) {
+        return;
+      }
+      if (!tokenRes.ok) {
+        setStatusMessage(null);
+        setErrorText(tokenRes.error);
+        return;
+      }
       const provisioned = await provisionWorkerSecrets(
         cfAccessToken,
         selectedWorker.accountId,
         nearAiApiKey,
+        tokenRes.value,
       );
       if (flowEpochRef.current !== epoch) {
         return;
@@ -261,7 +274,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
         return;
       }
       setWorkerUrl(selectedWorker.baseUrl);
-      await verifyLiveWorker(selectedWorker.baseUrl, epoch);
+      await verifyLiveWorker(selectedWorker.baseUrl, epoch, tokenRes.value);
     } finally {
       busyRef.current = false;
     }

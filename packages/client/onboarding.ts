@@ -420,6 +420,7 @@ export async function provisionWorkerSecrets(
   cfApiToken: string,
   accountId: string,
   nearAiApiKey: string,
+  agentAuthToken: string,
 ): Promise<
   { readonly ok: true } | { readonly ok: false; readonly error: string }
 > {
@@ -429,22 +430,31 @@ export async function provisionWorkerSecrets(
     Authorization: `Bearer ${cfApiToken.trim()}`,
     "Content-Type": "application/json",
   };
-  const secret = {
-    name: "NEARAI_API_KEY",
-    text: nearAiApiKey.trim(),
-    type: "secret_text",
-  };
+  const secrets = [
+    {
+      name: "NEARAI_API_KEY",
+      text: nearAiApiKey.trim(),
+      type: "secret_text",
+    },
+    {
+      name: "AGENT_AUTH_TOKEN",
+      text: agentAuthToken.trim(),
+      type: "secret_text",
+    },
+  ];
   try {
-    const response = await fetch(endpoint, {
-      method: "PUT",
-      headers,
-      body: JSON.stringify(secret),
-    });
-    if (!response.ok) {
-      return {
-        ok: false,
-        error: `Cloudflare secrets API returned HTTP ${response.status}`,
-      };
+    for (const secret of secrets) {
+      const response = await fetch(endpoint, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(secret),
+      });
+      if (!response.ok) {
+        return {
+          ok: false,
+          error: `Cloudflare secrets API returned HTTP ${response.status} for ${secret.name}`,
+        };
+      }
     }
     return { ok: true };
   } catch (thrown) {

@@ -1,7 +1,6 @@
 import { z } from "zod";
 
 import workerBundle from "./generated/worker-bundle.json";
-import { randomBase64Url } from "./pkce";
 
 export const DEFAULT_WORKER_NAME = "pi-in-the-sky-agent";
 
@@ -74,13 +73,17 @@ async function readCloudflareError(
   return `${fallbackPrefix} (HTTP ${response.status})`;
 }
 
+function randomBoundarySuffix(): string {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+}
+
 function buildWorkerMultipart(code: string): {
   readonly boundary: string;
   readonly body: string;
 } {
-  let boundary = `----PiInTheSkyBoundary${randomBase64Url(18)}`;
+  let boundary = `----PiInTheSkyBoundary${randomBoundarySuffix()}`;
   while (code.includes(boundary)) {
-    boundary = `----PiInTheSkyBoundary${randomBase64Url(18)}`;
+    boundary = `----PiInTheSkyBoundary${randomBoundarySuffix()}`;
   }
   const metadataJson = JSON.stringify(WORKER_METADATA);
   const body = [
@@ -113,8 +116,8 @@ export async function deployCloudflareWorker(
   }
   const cleanAccount = encodeURIComponent(accountId.trim());
   const authHeader = `Bearer ${cfApiToken.trim()}`;
-  const { boundary, body } = buildWorkerMultipart(workerBundle.code);
   try {
+    const { boundary, body } = buildWorkerMultipart(workerBundle.code);
     const uploadRes = await fetch(
       `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/scripts/${DEFAULT_WORKER_NAME}`,
       {

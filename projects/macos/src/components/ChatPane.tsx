@@ -15,7 +15,7 @@ type ChatPaneProps = {
   readonly messages: readonly ChatMessage[];
   readonly pendingApprovals: readonly ApprovalItem[];
   readonly activeTakeovers: readonly TakeoverItem[];
-  readonly onSend: (text: string) => void;
+  readonly onSend: (text: string) => boolean;
   readonly onAbort: () => void;
   readonly onResolveApproval: (id: string, approved: boolean) => void;
   readonly onResumeTakeover: (id: string) => void;
@@ -37,8 +37,9 @@ export function ChatPane({
     if (!trimmed) {
       return;
     }
-    onSend(trimmed);
-    setDraft("");
+    if (onSend(trimmed)) {
+      setDraft("");
+    }
   };
 
   return (

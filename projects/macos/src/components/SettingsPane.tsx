@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+
 import { validateBaseUrl } from "../agent-client";
 import type { ConnectionConfig, ConnectionState } from "../types";
 

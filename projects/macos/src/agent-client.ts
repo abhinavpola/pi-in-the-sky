@@ -6,6 +6,7 @@ import type {
   ConnectionConfig,
   ConnectionState,
   IncomingSocketMessage,
+  IncomingView,
   MemoryNote,
   ProfileEntry,
   TakeoverItem,
@@ -16,10 +17,15 @@ type ClientHandlers = {
   readonly onMessagesChange: (messages: ChatMessage[]) => void;
   readonly onApprovalRequested: (approval: ApprovalItem) => void;
   readonly onTakeoverRequested: (takeover: TakeoverItem) => void;
+  readonly onReset: () => void;
   readonly onError: (message: string) => void;
 };
 
-function extractMessagesFromEntries(entries: unknown[]): ChatMessage[] {
+function extractMessagesFromView(view: IncomingView): {
+  readonly messages: ChatMessage[];
+  readonly liveError: string | null;
+} {
+  const entries = view.entries ?? [];
   const result: ChatMessage[] = [];
   for (const raw of entries) {
     if (!raw || typeof raw !== "object") {
@@ -45,7 +51,20 @@ function extractMessagesFromEntries(entries: unknown[]): ChatMessage[] {
       }
     }
   }
-  return result;
+  const live = view.pi?.live;
+  const liveText = extractTextContent(live?.message?.content);
+  if (liveText) {
+    result.push({
+      id: "pi-live-assistant",
+      role: "assistant",
+      text: liveText,
+    });
+  }
+  const liveError =
+    typeof live?.error === "string" && live.error.length > 0
+      ? live.error
+      : null;
+  return { messages: result, liveError };
 }
 
 function extractTextContent(content: unknown): string {
@@ -78,24 +97,28 @@ type ReactNativeWebSocketConstructor = new (
   options?: { readonly headers?: Record<string, string> },
 ) => WebSocket;
 
+const BASE_URL_PATTERN =
+  /^(https?):\/\/(\[[^\]]+\]|[^/:?#]+)(?::\d+)?(\/.*)?$/i;
+
 export function validateBaseUrl(baseUrl: string): Result<string, string> {
-  let parsed: URL;
-  try {
-    parsed = new URL(baseUrl.trim());
-  } catch {
-    return err("Invalid server URL.");
+  const trimmed = baseUrl.trim().replace(/\/$/, "");
+  const match = BASE_URL_PATTERN.exec(trimmed);
+  if (!match?.[1] || !match[2]) {
+    return err("Server URL must use https:// (or http:// for localhost).");
   }
+  const scheme = match[1].toLowerCase();
+  const host = match[2].toLowerCase();
   const isLoopback =
-    parsed.hostname === "127.0.0.1" ||
-    parsed.hostname === "localhost" ||
-    parsed.hostname === "::1" ||
-    parsed.hostname === "[::1]";
-  switch (parsed.protocol) {
-    case "https:":
-      return ok(parsed.toString().replace(/\/$/, ""));
-    case "http:":
+    host === "127.0.0.1" ||
+    host === "localhost" ||
+    host === "::1" ||
+    host === "[::1]";
+  switch (scheme) {
+    case "https":
+      return ok(trimmed);
+    case "http":
       if (isLoopback) {
-        return ok(parsed.toString().replace(/\/$/, ""));
+        return ok(trimmed);
       }
       return err("Remote connections must use https://.");
     default:
@@ -157,6 +180,9 @@ export class AgentClient {
 
   updateConfig(config: ConnectionConfig): void {
     this.#config = config;
+    this.#messages = [];
+    this.#handlers.onMessagesChange([]);
+    this.#handlers.onReset();
     this.disconnect();
     this.connect();
   }
@@ -214,10 +240,14 @@ export class AgentClient {
     this.#handlers.onConnectionChange("disconnected");
   }
 
-  submitPrompt(input: string): void {
+  submitPrompt(input: string): boolean {
     const trimmed = input.trim();
     if (!trimmed) {
-      return;
+      return false;
+    }
+    if (!this.#socket || this.#socket.readyState !== 1) {
+      this.#handlers.onError("Not connected to agent.");
+      return false;
     }
     const operationId = this.#nextId("op");
     this.#messages = [
@@ -225,7 +255,7 @@ export class AgentClient {
       { id: operationId, role: "user", text: trimmed },
     ];
     this.#handlers.onMessagesChange(this.#messages);
-    this.#send({
+    return this.#send({
       type: "submit",
       id: this.#nextId("sub"),
       operationId,
@@ -293,12 +323,13 @@ export class AgentClient {
     return `${prefix}-${Date.now()}-${this.#commandSeq}`;
   }
 
-  #send(payload: Record<string, unknown>): void {
+  #send(payload: Record<string, unknown>): boolean {
     if (!this.#socket || this.#socket.readyState !== 1) {
       this.#handlers.onError("Not connected to agent.");
-      return;
+      return false;
     }
     this.#socket.send(JSON.stringify(payload));
+    return true;
   }
 
   #handleIncoming(message: IncomingSocketMessage): void {
@@ -307,11 +338,11 @@ export class AgentClient {
       case "result":
         return;
       case "view": {
-        const entries = message.view.entries ?? [];
-        const extracted = extractMessagesFromEntries(entries);
-        if (extracted.length > 0) {
-          this.#messages = extracted;
-          this.#handlers.onMessagesChange(this.#messages);
+        const { messages, liveError } = extractMessagesFromView(message.view);
+        this.#messages = messages;
+        this.#handlers.onMessagesChange(this.#messages);
+        if (liveError) {
+          this.#handlers.onError(liveError);
         }
         return;
       }

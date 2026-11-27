@@ -46,9 +46,20 @@ export type MemoryNote = {
   readonly createdAt: number;
 };
 
+export type IncomingView = {
+  readonly entries?: unknown[];
+  readonly pi?: {
+    readonly live?: {
+      readonly status?: string;
+      readonly message?: { readonly content?: unknown };
+      readonly error?: string;
+    } | null;
+  };
+};
+
 export type IncomingSocketMessage =
   | { readonly type: "hello"; readonly session: string }
-  | { readonly type: "view"; readonly view: { readonly entries?: unknown[] } }
+  | { readonly type: "view"; readonly view: IncomingView }
   | { readonly type: "ops"; readonly ops: readonly unknown[] }
   | { readonly type: "approval_requested"; readonly approval: ApprovalItem }
   | { readonly type: "takeover_requested"; readonly takeover: TakeoverItem }

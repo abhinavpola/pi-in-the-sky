@@ -53,6 +53,10 @@ export function App() {
             takeover,
           ]);
         },
+        onReset: () => {
+          setPendingApprovals([]);
+          setActiveTakeovers([]);
+        },
         onError: setErrorBanner,
       }),
     [],
@@ -85,7 +89,7 @@ export function App() {
             activeTakeovers={activeTakeovers}
             onSend={(text) => {
               setErrorBanner(null);
-              client.submitPrompt(text);
+              return client.submitPrompt(text);
             }}
             onAbort={() => client.abort()}
             onResolveApproval={handleResolveApproval}

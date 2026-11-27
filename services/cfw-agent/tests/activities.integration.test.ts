@@ -13,6 +13,7 @@ const SocketMessageSchema = z
   .object({
     type: z.string(),
     id: z.string().optional(),
+    result: z.unknown().optional(),
     activity: z
       .object({
         id: z.string(),
@@ -27,21 +28,10 @@ const SocketMessageSchema = z
 
 type ParsedSocketMessage = z.infer<typeof SocketMessageSchema>;
 
-const ActivitiesResponseSchema = z.object({
-  activities: z.array(
-    z.object({
-      id: z.string(),
-      title: z.string(),
-      status: z.string(),
-      collapsed: z.boolean(),
-      summary: z.string(),
-    }),
-  ),
+const CompactResultSchema = z.object({
+  ok: z.literal(true),
+  noteId: z.number(),
 });
-
-function stubFor(id: string): DurableObjectStub<TestPersonalAgent> {
-  return env.PersonalAgent.getByName(id);
-}
 
 function nextSocketMessage(
   ws: WebSocket,
@@ -80,10 +70,10 @@ function nextSocketMessage(
 
 describe("cfw-agent activities and compaction integration", () => {
   it("spawns a background subagent activity, persists encrypted record, and compacts the stream", async () => {
-    const agentId = "activity-stream-e2e";
-    const stub = stubFor(agentId);
+    const stub: DurableObjectStub<TestPersonalAgent> =
+      env.PersonalAgent.getByName("personal");
 
-    await stub.setScript(agentId, [
+    await stub.setScript("personal", [
       {
         toolCalls: [
           {
@@ -117,15 +107,12 @@ describe("cfw-agent activities and compaction integration", () => {
       },
     ]);
 
-    const wsResponse = await SELF.fetch(
-      `https://agent.test/api/agents/${agentId}/ws`,
-      {
-        headers: {
-          ...AUTH_HEADERS,
-          Upgrade: "websocket",
-        },
+    const wsResponse = await SELF.fetch("https://agent.test/api/me/ws", {
+      headers: {
+        ...AUTH_HEADERS,
+        Upgrade: "websocket",
       },
-    );
+    });
     const ws = wsResponse.webSocket;
     if (!ws) {
       throw new Error("Expected WebSocket upgrade");
@@ -154,30 +141,23 @@ describe("cfw-agent activities and compaction integration", () => {
     const runningMsg = await activityCreated;
     expect(runningMsg.activity?.title).toBe("Lisbon flight search");
 
-    const activitiesResp = await SELF.fetch(
-      `https://agent.test/api/agents/${agentId}/activities`,
-      { headers: AUTH_HEADERS },
-    );
-    expect(activitiesResp.status).toBe(200);
-    const activitiesJson = ActivitiesResponseSchema.parse(
-      await activitiesResp.json(),
-    );
-    expect(activitiesJson.activities.length).toBeGreaterThanOrEqual(1);
-
     const rawSqlite = await stub.dumpRawSqliteText();
     expect(rawSqlite).not.toContain("Lisbon flight search");
 
-    const compactResp = await SELF.fetch(
-      `https://agent.test/api/agents/${agentId}/compact`,
-      {
-        method: "POST",
-        headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          summary: "Discussed Lisbon trip; TAP TP236 shortlisted.",
-        }),
-      },
+    const compactDone = nextSocketMessage(
+      ws,
+      (m) => m.type === "result" && m.id === "cmd-compact",
+      "compact result",
     );
-    expect(compactResp.status).toBe(200);
+    ws.send(
+      JSON.stringify({
+        type: "compact",
+        id: "cmd-compact",
+        summary: "Discussed Lisbon trip; TAP TP236 shortlisted.",
+      }),
+    );
+    const compactMsg = await compactDone;
+    expect(CompactResultSchema.parse(compactMsg.result).ok).toBe(true);
 
     ws.close();
   });

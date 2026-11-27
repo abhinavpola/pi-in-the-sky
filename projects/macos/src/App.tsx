@@ -20,7 +20,6 @@ type ViewMode = "onboarding" | "stream" | "memory" | "settings";
 
 const DEFAULT_CONFIG: ConnectionConfig = {
   baseUrl: "http://127.0.0.1:8787",
-  agentId: "me",
   authToken: "",
 };
 

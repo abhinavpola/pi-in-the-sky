@@ -10,6 +10,7 @@ import {
   type ActivityRecord,
   type ClientMessage,
   ClientMessageSchema,
+  type ConnectorProvider,
 } from "@pi-in-the-sky/client/protocol";
 import {
   type PiHarness,
@@ -109,6 +110,22 @@ type SocketCallbacks = {
     collapsed: boolean,
   ) => Promise<CommandResult>;
   readonly onCompactThread: (summary: string) => Promise<CommandResult>;
+  readonly onGetProfile: () => Promise<CommandResult>;
+  readonly onSetProfile: (key: string, value: string) => Promise<CommandResult>;
+  readonly onSearchNotes: (
+    query?: string,
+    limit?: number,
+  ) => Promise<CommandResult>;
+  readonly onAddNote: (
+    content: string,
+    category?: string,
+  ) => Promise<CommandResult>;
+  readonly onSetConnectorToken: (
+    provider: ConnectorProvider,
+    accessToken: string,
+    refreshToken?: string,
+    expiresAt?: number,
+  ) => Promise<CommandResult>;
 };
 
 export class AgentSockets {
@@ -381,6 +398,26 @@ export class AgentSockets {
       }
       case "toggle_activity": {
         return this.#callbacks.onToggleActivity(msg.activityId, msg.collapsed);
+      }
+      case "get_profile": {
+        return this.#callbacks.onGetProfile();
+      }
+      case "set_profile": {
+        return this.#callbacks.onSetProfile(msg.key, msg.value);
+      }
+      case "search_notes": {
+        return this.#callbacks.onSearchNotes(msg.query, msg.limit);
+      }
+      case "add_note": {
+        return this.#callbacks.onAddNote(msg.content, msg.category);
+      }
+      case "set_connector_token": {
+        return this.#callbacks.onSetConnectorToken(
+          msg.provider,
+          msg.accessToken,
+          msg.refreshToken,
+          msg.expiresAt,
+        );
       }
       default: {
         msg satisfies never;

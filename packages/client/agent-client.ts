@@ -19,7 +19,6 @@ export type ConnectionState = "disconnected" | "connecting" | "connected";
 
 export type ConnectionConfig = {
   readonly baseUrl: string;
-  readonly agentId: string;
   readonly authToken: string;
   readonly refreshToken?: string;
   readonly accessTeamDomain?: string;
@@ -41,6 +40,7 @@ type ClientHandlers = {
 
 const ProfileListSchema = z.object({ entries: z.array(ProfileEntrySchema) });
 const NotesListSchema = z.object({ notes: z.array(MemoryNoteSchema) });
+const OkResponseSchema = z.object({ ok: z.literal(true) });
 
 const BASE_URL_PATTERN =
   /^(https?):\/\/(\[[^\]]+\]|[^/:?#]+)(?::\d+)?(\/.*)?$/i;
@@ -70,48 +70,9 @@ export function validateBaseUrl(baseUrl: string): Result<string, string> {
   }
 }
 
-function apiPrefix(config: ConnectionConfig): string {
-  const customId = config.agentId.trim();
-  if (!customId || customId === "me" || config.accessTeamDomain) {
-    return "/api/me";
-  }
-  return `/api/agents/${encodeURIComponent(customId)}`;
-}
-
-async function requestJson<T>(
-  config: ConnectionConfig,
-  path: string,
-  schema: z.ZodType<T>,
-  init?: RequestInit,
-): Promise<Result<T, string>> {
-  const validated = validateBaseUrl(config.baseUrl);
-  if (!validated.ok) {
-    return validated;
-  }
-  try {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (config.authToken) {
-      headers.Authorization = `Bearer ${config.authToken}`;
-    }
-    const response = await fetch(
-      `${validated.value}${apiPrefix(config)}${path}`,
-      { ...init, headers },
-    );
-    const text = await response.text();
-    if (!response.ok) {
-      return err(`HTTP ${response.status}: ${text}`);
-    }
-    const parsed = schema.safeParse(text ? JSON.parse(text) : {});
-    if (!parsed.success) {
-      return err("Unexpected response shape from agent.");
-    }
-    return ok(parsed.data);
-  } catch (thrown) {
-    return err(thrown instanceof Error ? thrown.message : String(thrown));
-  }
-}
+type PendingRpc = {
+  readonly resolve: (value: Result<unknown, string>) => void;
+};
 
 export class AgentClient {
   #config: ConnectionConfig;
@@ -120,6 +81,7 @@ export class AgentClient {
   #messages: ChatMessage[] = [];
   #activities: ActivityRecord[] = [];
   #commandSeq = 0;
+  readonly #pending = new Map<string, PendingRpc>();
 
   constructor(config: ConnectionConfig, handlers: ClientHandlers) {
     this.#config = config;
@@ -150,7 +112,7 @@ export class AgentClient {
       headers.Authorization = `Bearer ${this.#config.authToken}`;
     }
     const wsBase = validated.value.replace(/^http/, "ws");
-    const wsUrl = `${wsBase}${apiPrefix(this.#config)}/ws`;
+    const wsUrl = `${wsBase}/api/me/ws`;
     const socket = this.#handlers.createSocket
       ? this.#handlers.createSocket(wsUrl, headers)
       : new WebSocket(wsUrl);
@@ -181,6 +143,7 @@ export class AgentClient {
     socket.onclose = () => {
       if (this.#socket === socket) {
         this.#socket = null;
+        this.#rejectAllPending("Disconnected from agent.");
         this.#handlers.onConnectionChange("disconnected");
       }
     };
@@ -191,6 +154,7 @@ export class AgentClient {
       this.#socket.close();
       this.#socket = null;
     }
+    this.#rejectAllPending("Disconnected from agent.");
     this.#handlers.onConnectionChange("disconnected");
   }
 
@@ -257,23 +221,29 @@ export class AgentClient {
   }
 
   getProfile(): Promise<Result<{ entries: ProfileEntry[] }, string>> {
-    return requestJson(this.#config, "/profile", ProfileListSchema);
+    return this.#call(
+      { type: "get_profile", id: this.#nextId("prof") },
+      ProfileListSchema,
+    );
   }
 
   setProfileEntry(
     key: string,
     value: string,
-  ): Promise<Result<ProfileEntry, string>> {
-    return requestJson(this.#config, "/profile", ProfileEntrySchema, {
-      method: "PUT",
-      body: JSON.stringify({ key, value }),
-    });
+  ): Promise<Result<{ ok: true }, string>> {
+    return this.#call(
+      { type: "set_profile", id: this.#nextId("setprof"), key, value },
+      OkResponseSchema,
+    );
   }
 
   searchNotes(query: string): Promise<Result<{ notes: MemoryNote[] }, string>> {
-    return requestJson(
-      this.#config,
-      `/notes?q=${encodeURIComponent(query)}`,
+    return this.#call(
+      {
+        type: "search_notes",
+        id: this.#nextId("notes"),
+        query: query.trim() || undefined,
+      },
       NotesListSchema,
     );
   }
@@ -282,10 +252,10 @@ export class AgentClient {
     content: string,
     category = "general",
   ): Promise<Result<MemoryNote, string>> {
-    return requestJson(this.#config, "/notes", MemoryNoteSchema, {
-      method: "POST",
-      body: JSON.stringify({ content, category }),
-    });
+    return this.#call(
+      { type: "add_note", id: this.#nextId("addnote"), content, category },
+      MemoryNoteSchema,
+    );
   }
 
   #nextId(prefix: string): string {
@@ -293,47 +263,96 @@ export class AgentClient {
     return `${prefix}-${Date.now()}-${this.#commandSeq}`;
   }
 
-  #send(payload: ClientMessage): boolean {
+  #rejectAllPending(reason: string): void {
+    for (const pending of this.#pending.values()) {
+      pending.resolve(err(reason));
+    }
+    this.#pending.clear();
+  }
+
+  async #call<T>(
+    message: ClientMessage,
+    schema: z.ZodType<T>,
+  ): Promise<Result<T, string>> {
     if (!this.#socket || this.#socket.readyState !== 1) {
-      this.#handlers.onError("Not connected to agent.");
+      return err("Not connected to agent.");
+    }
+    const raw = await new Promise<Result<unknown, string>>((resolve) => {
+      this.#pending.set(message.id, { resolve });
+      if (!this.#send(message)) {
+        this.#pending.delete(message.id);
+        resolve(err("Failed to send WebSocket message."));
+      }
+    });
+    if (!raw.ok) {
+      return raw;
+    }
+    const parsed = schema.safeParse(raw.value);
+    if (!parsed.success) {
+      return err("Unexpected response shape from agent.");
+    }
+    return ok(parsed.data);
+  }
+
+  #send(message: ClientMessage): boolean {
+    if (!this.#socket || this.#socket.readyState !== 1) {
       return false;
     }
-    this.#socket.send(JSON.stringify(payload));
+    this.#socket.send(JSON.stringify(message));
     return true;
   }
 
-  #handleIncoming(message: IncomingSocketMessage): void {
-    switch (message.type) {
+  #handleIncoming(msg: IncomingSocketMessage): void {
+    switch (msg.type) {
       case "hello":
-        this.#activities = [...message.activities];
+        this.#activities = msg.activities;
         this.#handlers.onActivitiesChange(this.#activities);
         return;
-      case "result":
+      case "result": {
+        if (msg.id) {
+          const pending = this.#pending.get(msg.id);
+          if (pending) {
+            this.#pending.delete(msg.id);
+            pending.resolve(ok(msg.result));
+          }
+        }
         return;
+      }
       case "view": {
-        const { messages, liveError } = extractMessagesFromView(message.view);
-        this.#messages = messages;
+        const extracted = extractMessagesFromView(msg.view);
+        this.#messages = extracted.messages;
         this.#handlers.onMessagesChange(this.#messages);
-        if (liveError) {
-          this.#handlers.onError(liveError);
+        if (extracted.liveError) {
+          this.#handlers.onError(extracted.liveError);
         }
         return;
       }
       case "takeover_requested":
-        this.#handlers.onTakeoverRequested(message.takeover);
+        this.#handlers.onTakeoverRequested(msg.takeover);
         return;
-      case "activity_updated":
-        this.#activities = [
-          message.activity,
-          ...this.#activities.filter((a) => a.id !== message.activity.id),
-        ];
-        this.#handlers.onActivitiesChange(this.#activities);
+      case "activity_updated": {
+        const next = [
+          msg.activity,
+          ...this.#activities.filter((item) => item.id !== msg.activity.id),
+        ].sort((a, b) => b.updatedAt - a.updatedAt);
+        this.#activities = next;
+        this.#handlers.onActivitiesChange(next);
         return;
-      case "error":
-        this.#handlers.onError(message.message);
+      }
+      case "error": {
+        if (msg.id) {
+          const pending = this.#pending.get(msg.id);
+          if (pending) {
+            this.#pending.delete(msg.id);
+            pending.resolve(err(msg.message));
+            return;
+          }
+        }
+        this.#handlers.onError(msg.message);
         return;
+      }
       default: {
-        message satisfies never;
+        msg satisfies never;
       }
     }
   }

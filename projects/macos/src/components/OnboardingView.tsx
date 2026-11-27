@@ -67,7 +67,6 @@ export function OnboardingView({
               setPkceSession(null);
               onComplete({
                 baseUrl: workerUrl,
-                agentId: "me",
                 authToken: result.accessToken,
                 refreshToken: result.refreshToken,
                 accessTeamDomain: teamDomain,
@@ -105,7 +104,6 @@ export function OnboardingView({
         setStatusMessage("Worker is live (local dev mode).");
         onComplete({
           baseUrl: status.baseUrl,
-          agentId: "personal",
           authToken: LOCAL_DEV_AUTH_TOKEN,
         });
         return;

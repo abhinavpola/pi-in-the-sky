@@ -22,7 +22,6 @@ import { ConnectorStore, createConnectorsExtension } from "./connectors";
 import type { HttpFetcher } from "./http-tool";
 import { createMemoryExtension, MemoryStore } from "./memory";
 import { createNearAiProvider, DEFAULT_NEARAI_MODEL } from "./providers";
-import { handleAgentHttpRequest } from "./routes";
 import { createSkillsExtension } from "./skills";
 import { ACCESS_TOKEN_EXP_HEADER, AgentSockets } from "./sockets";
 import { VaultCipher } from "./vault";
@@ -181,6 +180,32 @@ export class PersonalAgent extends DurableObject<Env> {
       onToggleActivity: (activityId, collapsed) =>
         this.toggleActivity(activityId, collapsed),
       onCompactThread: (summary) => this.compactThread(summary),
+      onGetProfile: async () => ({
+        entries: await this.memory.getProfile(),
+      }),
+      onSetProfile: async (key, value) => {
+        await this.memory.setProfileEntry(key, value);
+        return { ok: true };
+      },
+      onSearchNotes: async (query, limit) => ({
+        notes: await this.memory.searchNotes(query ?? "", limit ?? 20),
+      }),
+      onAddNote: (content, category) =>
+        this.memory.addNote(content, category ?? "general"),
+      onSetConnectorToken: async (
+        provider,
+        accessToken,
+        refreshToken,
+        expiresAt,
+      ) => {
+        await this.connectors.setToken(
+          provider,
+          accessToken,
+          refreshToken,
+          expiresAt,
+        );
+        return { ok: true };
+      },
     },
   );
 
@@ -326,14 +351,6 @@ export class PersonalAgent extends DurableObject<Env> {
     await this.harness.session(ROOT_SESSION).reset(summary);
     return { ok: true, noteId: note.id };
   }
-
-  async onRequest(request: Request): Promise<Response> {
-    const bodyText =
-      request.method !== "GET" && request.method !== "HEAD"
-        ? await request.text()
-        : "";
-    return handleAgentHttpRequest(request, bodyText, this);
-  }
 }
 
 export default {
@@ -373,35 +390,15 @@ export default {
       );
     }
 
-    const meMatch = url.pathname.match(/^\/api\/me(\/.*)?$/);
-    if (meMatch) {
-      const agentId = identity?.sub ?? "personal";
-      const stub = env.PersonalAgent.getByName(agentId);
-      const response = await forwardToDurableObject(
-        stub,
-        request,
-        identity?.exp ?? null,
-      );
-      return withCors(request, response);
-    }
-
-    const agentMatch = url.pathname.match(/^\/api\/agents\/([^/]+)(\/.*)?$/);
-    if (!agentMatch?.[1]) {
+    if (url.pathname !== "/api/me/ws") {
       return withCors(
         request,
         Response.json({ error: "Not found" }, { status: 404 }),
       );
     }
 
-    const requestedId = decodeURIComponent(agentMatch[1]);
-    if (identity && requestedId !== identity.sub) {
-      return withCors(
-        request,
-        Response.json({ error: "Forbidden" }, { status: 403 }),
-      );
-    }
-
-    const stub = env.PersonalAgent.getByName(requestedId);
+    const agentId = identity?.sub ?? "personal";
+    const stub = env.PersonalAgent.getByName(agentId);
     const response = await forwardToDurableObject(
       stub,
       request,

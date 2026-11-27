@@ -33,7 +33,6 @@ export function SettingsPane({
   onSave,
 }: SettingsPaneProps) {
   const [baseUrl, setBaseUrl] = useState(config.baseUrl);
-  const [agentId, setAgentId] = useState(config.agentId);
   const [authToken, setAuthToken] = useState(config.authToken);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -70,7 +69,6 @@ export function SettingsPane({
             setStatusMessage("Signed in with Cloudflare Access.");
             onSave({
               baseUrl: pendingAuth.baseUrl,
-              agentId: "me",
               authToken: result.accessToken,
               refreshToken: result.refreshToken,
               accessTeamDomain: pendingAuth.teamDomain,
@@ -105,7 +103,6 @@ export function SettingsPane({
             accessClientId: config.accessClientId,
           }),
       baseUrl: validated.value,
-      agentId: agentId.trim() || "me",
       authToken: authToken.trim(),
     });
   };
@@ -216,15 +213,6 @@ export function SettingsPane({
           </Pressable>
         ) : null}
       </View>
-
-      <Text style={styles.label}>Agent ID (local dev)</Text>
-      <TextInput
-        style={styles.input}
-        value={agentId}
-        onChangeText={setAgentId}
-        placeholder="personal"
-        placeholderTextColor="#6b7280"
-      />
 
       <Text style={styles.label}>Access JWT or Local Dev Token</Text>
       <TextInput

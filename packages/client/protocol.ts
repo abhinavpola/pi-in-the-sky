@@ -2,6 +2,9 @@ import { z } from "zod";
 
 export const LOCAL_DEV_AUTH_TOKEN = "pi-in-the-sky-local-dev";
 
+export const ConnectorProviderSchema = z.enum(["gmail", "google_calendar"]);
+export type ConnectorProvider = z.infer<typeof ConnectorProviderSchema>;
+
 export const ActivityStatusSchema = z.enum([
   "running",
   "waiting_input",
@@ -118,6 +121,36 @@ export const ClientMessageSchema = z.discriminatedUnion("type", [
     activityId: z.string(),
     collapsed: z.boolean(),
   }),
+  z.object({
+    type: z.literal("get_profile"),
+    id: z.string(),
+  }),
+  z.object({
+    type: z.literal("set_profile"),
+    id: z.string(),
+    key: z.string().min(1),
+    value: z.string(),
+  }),
+  z.object({
+    type: z.literal("search_notes"),
+    id: z.string(),
+    query: z.string().optional(),
+    limit: z.number().int().positive().max(100).optional(),
+  }),
+  z.object({
+    type: z.literal("add_note"),
+    id: z.string(),
+    content: z.string().min(1),
+    category: z.string().optional(),
+  }),
+  z.object({
+    type: z.literal("set_connector_token"),
+    id: z.string(),
+    provider: ConnectorProviderSchema,
+    accessToken: z.string().min(1),
+    refreshToken: z.string().optional(),
+    expiresAt: z.number().optional(),
+  }),
 ]);
 
 export type ClientMessage = z.infer<typeof ClientMessageSchema>;
@@ -173,9 +206,14 @@ export const IncomingSocketMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("activity_updated"),
     activity: ActivityRecordSchema,
   }),
-  z.object({ type: z.literal("result") }),
+  z.object({
+    type: z.literal("result"),
+    id: z.string().optional(),
+    result: z.unknown().optional(),
+  }),
   z.object({
     type: z.literal("error"),
+    id: z.string().optional(),
     message: z.string().default("Unknown agent error"),
   }),
 ]);

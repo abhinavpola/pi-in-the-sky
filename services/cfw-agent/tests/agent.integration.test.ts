@@ -14,19 +14,11 @@ const SocketMessageSchema = z
   .object({
     type: z.string(),
     id: z.string().optional(),
+    result: z.unknown().optional(),
     takeover: z
       .object({
         id: z.string(),
         liveViewUrl: z.string().nullable(),
-      })
-      .optional(),
-    activity: z
-      .object({
-        id: z.string(),
-        title: z.string(),
-        status: z.string(),
-        collapsed: z.boolean(),
-        summary: z.string(),
       })
       .optional(),
   })
@@ -51,8 +43,8 @@ const TakeoverResumeResponseSchema = z.object({
   delivered: z.string(),
 });
 
-function stubFor(id: string): DurableObjectStub<TestPersonalAgent> {
-  return env.PersonalAgent.getByName(id);
+function personalStub(): DurableObjectStub<TestPersonalAgent> {
+  return env.PersonalAgent.getByName("personal");
 }
 
 function toBase64Url(bytes: Uint8Array): string {
@@ -119,8 +111,39 @@ function nextSocketMessage(
   });
 }
 
+async function connectMeSocket(): Promise<WebSocket> {
+  const wsResponse = await SELF.fetch("https://agent.test/api/me/ws", {
+    headers: {
+      ...AUTH_HEADERS,
+      Upgrade: "websocket",
+    },
+  });
+  expect(wsResponse.status).toBe(101);
+  const ws = wsResponse.webSocket;
+  if (!ws) {
+    throw new Error("Expected WebSocket upgrade");
+  }
+  ws.accept();
+  await nextSocketMessage(ws, (m) => m.type === "hello", "hello");
+  return ws;
+}
+
+async function wsRpc(
+  ws: WebSocket,
+  payload: Record<string, unknown> & { readonly id: string },
+): Promise<unknown> {
+  const responsePromise = nextSocketMessage(
+    ws,
+    (m) => m.type === "result" && m.id === payload.id,
+    `result:${payload.id}`,
+  );
+  ws.send(JSON.stringify(payload));
+  const msg = await responsePromise;
+  return msg.result;
+}
+
 describe("cfw-agent workerd integration", () => {
-  it("enforces fail-closed auth, /auth/config discovery, /api/me routing, and Cloudflare Access RS256 JWT verification", async () => {
+  it("enforces fail-closed auth, /auth/config discovery, /api/me/ws routing, and Cloudflare Access RS256 JWT verification", async () => {
     const health = await SELF.fetch("https://agent.test/health");
     expect(health.status).toBe(200);
     expect(HealthResponseSchema.parse(await health.json())).toEqual({
@@ -130,16 +153,20 @@ describe("cfw-agent workerd integration", () => {
     const authConfig = await SELF.fetch("https://agent.test/auth/config");
     expect(authConfig.status).toBe(200);
 
-    const unauthorized = await SELF.fetch("https://agent.test/api/me/profile");
+    const unauthorized = await SELF.fetch("https://agent.test/api/me/ws", {
+      headers: { Upgrade: "websocket" },
+    });
     expect(unauthorized.status).toBe(401);
 
-    const meAuthorized = await SELF.fetch("https://agent.test/api/me/profile", {
-      headers: AUTH_HEADERS,
+    const ws = await connectMeSocket();
+    const profileResult = await wsRpc(ws, {
+      type: "get_profile",
+      id: "rpc-prof-1",
     });
-    expect(meAuthorized.status).toBe(200);
-    expect(ProfileResponseSchema.parse(await meAuthorized.json())).toEqual({
+    expect(ProfileResponseSchema.parse(profileResult)).toEqual({
       entries: [],
     });
+    ws.close();
 
     const keyPair = await crypto.subtle.generateKey(
       {
@@ -178,7 +205,7 @@ describe("cfw-agent workerd integration", () => {
     );
 
     const verified = await verifyCloudflareAccessJwt(
-      new Request("https://agent.test/api/me/profile", {
+      new Request("https://agent.test/api/me/ws", {
         headers: { "Cf-Access-Jwt-Assertion": validJwt },
       }),
       accessConfig,
@@ -201,7 +228,7 @@ describe("cfw-agent workerd integration", () => {
     );
     expect(
       await verifyCloudflareAccessJwt(
-        new Request("https://agent.test/api/me/profile", {
+        new Request("https://agent.test/api/me/ws", {
           headers: { Authorization: `Bearer ${wrongAudJwt}` },
         }),
         accessConfig,
@@ -220,7 +247,7 @@ describe("cfw-agent workerd integration", () => {
     );
     expect(
       await verifyCloudflareAccessJwt(
-        new Request("https://agent.test/api/me/profile", {
+        new Request("https://agent.test/api/me/ws", {
           headers: { Authorization: `Bearer ${expiredJwt}` },
         }),
         accessConfig,
@@ -228,45 +255,14 @@ describe("cfw-agent workerd integration", () => {
     ).toBeNull();
   });
 
-  it("plans a repeat trip with zero plaintext prompts, completions, notes, or tokens in SQLite", async () => {
-    const agentId = "trip-planner-e2e";
+  it("plans a repeat trip over WebSocket with zero plaintext prompts, completions, notes, or tokens in SQLite", async () => {
     const secretHomeAirport = "SFO-PRIVATE-AIRPORT-991";
     const secretOauthToken = "ya29.super-secret-oauth-token-xyz";
     const secretPromptPhrase = "SECRET_TOKYO_PROMPT_CANARY_42";
     const secretReplyPhrase = "SECRET_ANA_NH7_COMPLETION_CANARY_88";
 
-    const putProfile = await SELF.fetch(
-      `https://agent.test/api/agents/${agentId}/profile`,
-      {
-        method: "PUT",
-        headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
-        body: JSON.stringify({ key: "home_airport", value: secretHomeAirport }),
-      },
-    );
-    expect(putProfile.status).toBe(200);
-
-    const putToken = await SELF.fetch(
-      `https://agent.test/api/agents/${agentId}/connectors/gmail/token`,
-      {
-        method: "PUT",
-        headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
-        body: JSON.stringify({ accessToken: secretOauthToken }),
-      },
-    );
-    expect(putToken.status).toBe(200);
-
-    const putCalendarToken = await SELF.fetch(
-      `https://agent.test/api/agents/${agentId}/connectors/google_calendar/token`,
-      {
-        method: "PUT",
-        headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
-        body: JSON.stringify({ accessToken: "calendar-test-token" }),
-      },
-    );
-    expect(putCalendarToken.status).toBe(200);
-
-    const stub = stubFor(agentId);
-    await stub.setScript(agentId, [
+    const stub = personalStub();
+    await stub.setScript("personal", [
       {
         toolCalls: [
           {
@@ -338,43 +334,36 @@ describe("cfw-agent workerd integration", () => {
       },
     ]);
 
-    const wsResponse = await SELF.fetch(
-      `https://agent.test/api/agents/${agentId}/ws`,
-      {
-        headers: {
-          ...AUTH_HEADERS,
-          Upgrade: "websocket",
-        },
-      },
-    );
-    expect(wsResponse.status).toBe(101);
-    const ws = wsResponse.webSocket;
-    if (!ws) {
-      throw new Error("Expected WebSocket upgrade");
-    }
-    ws.accept();
+    const ws = await connectMeSocket();
 
-    const hello = await nextSocketMessage(ws, (m) => m.type === "hello");
-    expect(hello.type).toBe("hello");
+    await wsRpc(ws, {
+      type: "set_profile",
+      id: "rpc-set-profile",
+      key: "home_airport",
+      value: secretHomeAirport,
+    });
+    await wsRpc(ws, {
+      type: "set_connector_token",
+      id: "rpc-set-gmail",
+      provider: "gmail",
+      accessToken: secretOauthToken,
+    });
+    await wsRpc(ws, {
+      type: "set_connector_token",
+      id: "rpc-set-cal",
+      provider: "google_calendar",
+      accessToken: "calendar-test-token",
+    });
 
     ws.send(JSON.stringify({ type: "watch", id: "cmd-watch" }));
     await nextSocketMessage(ws, (m) => m.type === "view");
 
-    const promptOpId = "op-trip-tokyo-1";
-    ws.send(
-      JSON.stringify({
-        type: "submit",
-        id: "cmd-submit-1",
-        operationId: promptOpId,
-        input: `${secretPromptPhrase} Look up my Tokyo trip from last year and plan the same trip.`,
-      }),
-    );
-
-    const submitResult = await nextSocketMessage(
-      ws,
-      (m) => m.type === "result" && m.id === "cmd-submit-1",
-    );
-    expect(submitResult.type).toBe("result");
+    await wsRpc(ws, {
+      type: "submit",
+      id: "cmd-submit-1",
+      operationId: "op-trip-tokyo-1",
+      input: `${secretPromptPhrase} Look up my Tokyo trip from last year and plan the same trip.`,
+    });
 
     await nextSocketMessage(
       ws,
@@ -383,12 +372,12 @@ describe("cfw-agent workerd integration", () => {
       10_000,
     );
 
-    const searchNotes = await SELF.fetch(
-      `https://agent.test/api/agents/${agentId}/notes?q=Tokyo`,
-      { headers: AUTH_HEADERS },
-    );
-    expect(searchNotes.status).toBe(200);
-    const searchJson = NotesResponseSchema.parse(await searchNotes.json());
+    const searchResult = await wsRpc(ws, {
+      type: "search_notes",
+      id: "rpc-search-notes",
+      query: "Tokyo",
+    });
+    const searchJson = NotesResponseSchema.parse(searchResult);
     expect(searchJson.notes.length).toBeGreaterThanOrEqual(1);
     expect(searchJson.notes[0]?.content).toContain("ANA NH7");
 
@@ -402,11 +391,10 @@ describe("cfw-agent workerd integration", () => {
     ws.close();
   });
 
-  it("supports browser Live View takeover pause and resume", async () => {
-    const agentId = "browser-takeover-e2e";
-    const stub = stubFor(agentId);
+  it("supports browser Live View takeover pause and resume over WebSocket", async () => {
+    const stub = personalStub();
 
-    await stub.setScript(agentId, [
+    await stub.setScript("personal", [
       {
         toolCalls: [
           {
@@ -425,22 +413,7 @@ describe("cfw-agent workerd integration", () => {
       },
     ]);
 
-    const wsResponse = await SELF.fetch(
-      `https://agent.test/api/agents/${agentId}/ws`,
-      {
-        headers: {
-          ...AUTH_HEADERS,
-          Upgrade: "websocket",
-        },
-      },
-    );
-    const ws = wsResponse.webSocket;
-    if (!ws) {
-      throw new Error("Expected WebSocket upgrade");
-    }
-    ws.accept();
-
-    await nextSocketMessage(ws, (m) => m.type === "hello", "hello");
+    const ws = await connectMeSocket();
     ws.send(JSON.stringify({ type: "watch", id: "cmd-watch-takeover" }));
     await nextSocketMessage(ws, (m) => m.type === "view", "view");
 
@@ -477,18 +450,13 @@ describe("cfw-agent workerd integration", () => {
       10_000,
     );
 
-    const resumeResp = await SELF.fetch(
-      `https://agent.test/api/agents/${agentId}/takeovers/${encodeURIComponent(takeoverId)}/resume`,
-      {
-        method: "POST",
-        headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
-        body: JSON.stringify({ note: "MFA completed" }),
-      },
-    );
-    expect(resumeResp.status).toBe(200);
-    const resumeJson = TakeoverResumeResponseSchema.parse(
-      await resumeResp.json(),
-    );
+    const resumeResult = await wsRpc(ws, {
+      type: "resume_takeover",
+      id: "cmd-resume-takeover",
+      takeoverId,
+      note: "MFA completed",
+    });
+    const resumeJson = TakeoverResumeResponseSchema.parse(resumeResult);
     expect(resumeJson.takeoverId).toBe(takeoverId);
     expect(resumeJson.delivered).toBe("delivered");
 

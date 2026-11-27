@@ -1,5 +1,6 @@
 import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { num, obj, opt, str } from "@earendil-works/pi-schema";
+import type { ConnectorProvider } from "@pi-in-the-sky/client/protocol";
 import { z } from "zod";
 
 import {
@@ -8,9 +9,6 @@ import {
   toToolResult,
 } from "./http-tool";
 import { toBase64, type VaultCipher } from "./vault";
-
-export const ConnectorProviderSchema = z.enum(["gmail", "google_calendar"]);
-type ConnectorProvider = z.infer<typeof ConnectorProviderSchema>;
 
 const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
 const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3";

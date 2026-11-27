@@ -351,6 +351,15 @@ export function createExtensionsExtension(
   const repoName = cleanScope
     ? `${ARTIFACTS_REPO_PREFIX}-${cleanScope}`
     : ARTIFACTS_REPO_PREFIX;
+  let mutationChain: Promise<unknown> = Promise.resolve();
+  const enqueueMutation = <T>(run: () => Promise<T>): Promise<T> => {
+    const next = mutationChain.then(run, run);
+    mutationChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  };
   const saveTool: ToolRegistration<typeof SaveExtensionSchema> = {
     name: "extension_save",
     description:
@@ -379,20 +388,22 @@ export function createExtensionsExtension(
         description: description.trim(),
         updatedAt: new Date().toISOString(),
       };
-      const result = await mutateRepo(
-        artifacts,
-        repoName,
-        commitMessage?.trim() || `Save extension ${name}`,
-        async (fs, dir) => {
-          const codeRel = `extensions/${name}/index.js`;
-          const manifestRel = `extensions/${name}/manifest.json`;
-          await fs.writeFile(`${dir}/${codeRel}`, code);
-          await fs.writeFile(
-            `${dir}/${manifestRel}`,
-            `${JSON.stringify(manifest, null, 2)}\n`,
-          );
-          return [codeRel, manifestRel];
-        },
+      const result = await enqueueMutation(() =>
+        mutateRepo(
+          artifacts,
+          repoName,
+          commitMessage?.trim() || `Save extension ${name}`,
+          async (fs, dir) => {
+            const codeRel = `extensions/${name}/index.js`;
+            const manifestRel = `extensions/${name}/manifest.json`;
+            await fs.writeFile(`${dir}/${codeRel}`, code);
+            await fs.writeFile(
+              `${dir}/${manifestRel}`,
+              `${JSON.stringify(manifest, null, 2)}\n`,
+            );
+            return [codeRel, manifestRel];
+          },
+        ),
       );
       return jsonToolResult({ ok: true, name, commit: result.commit });
     },
@@ -487,17 +498,19 @@ export function createExtensionsExtension(
       if (!isValidExtensionName(name)) {
         return jsonToolResult({ error: "Invalid extension name." }, true);
       }
-      const result = await mutateRepo(
-        artifacts,
-        repoName,
-        commitMessage?.trim() || `Delete extension ${name}`,
-        async (fs, dir) => {
-          const codeRel = `extensions/${name}/index.js`;
-          const manifestRel = `extensions/${name}/manifest.json`;
-          await fs.unlink(`${dir}/${codeRel}`).catch(() => undefined);
-          await fs.unlink(`${dir}/${manifestRel}`).catch(() => undefined);
-          return [codeRel, manifestRel];
-        },
+      const result = await enqueueMutation(() =>
+        mutateRepo(
+          artifacts,
+          repoName,
+          commitMessage?.trim() || `Delete extension ${name}`,
+          async (fs, dir) => {
+            const codeRel = `extensions/${name}/index.js`;
+            const manifestRel = `extensions/${name}/manifest.json`;
+            await fs.unlink(`${dir}/${codeRel}`).catch(() => undefined);
+            await fs.unlink(`${dir}/${manifestRel}`).catch(() => undefined);
+            return [codeRel, manifestRel];
+          },
+        ),
       );
       return jsonToolResult({ ok: true, name, commit: result.commit });
     },

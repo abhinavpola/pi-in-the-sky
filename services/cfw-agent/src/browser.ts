@@ -283,14 +283,9 @@ export function createBrowserExtension(
       });
       onTakeoverRequested(record);
       return {
-        park: {
-          checkpoint: { takeoverId },
-          wait: {
-            kind: "signal",
-            signal: BrowserTakeoverSignal,
-            key: takeoverId,
-          },
-        },
+        kind: "sleep",
+        checkpoint: { takeoverId },
+        signals: [BrowserTakeoverSignal.key(takeoverId)],
       };
     },
   };

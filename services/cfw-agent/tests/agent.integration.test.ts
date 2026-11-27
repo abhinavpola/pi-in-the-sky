@@ -326,6 +326,13 @@ describe("cfw-agent workerd integration", () => {
       throw new Error("Expected takeover ID");
     }
 
+    const postTakeoverPromise = nextSocketMessage(
+      ws,
+      (m) => m.type === "ops" && JSON.stringify(m).includes("Sign-in complete"),
+      "post-takeover assistant message",
+      10_000,
+    );
+
     const resumeResp = await SELF.fetch(
       `https://agent.test/api/agents/${agentId}/takeovers/${encodeURIComponent(takeoverId)}/resume`,
       {
@@ -339,6 +346,9 @@ describe("cfw-agent workerd integration", () => {
       await resumeResp.json(),
     );
     expect(resumeJson.takeoverId).toBe(takeoverId);
+    expect(resumeJson.delivered).toBe("delivered");
+
+    await postTakeoverPromise;
 
     ws.close();
   });

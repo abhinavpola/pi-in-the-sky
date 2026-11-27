@@ -138,11 +138,21 @@ export function App() {
 
   const handleSignOut = () => {
     sessionEpochRef.current += 1;
-    setConfig(DEFAULT_CONFIG);
     setErrorBanner(null);
     setShowDrawer(false);
     client.disconnect();
-    setViewMode("onboarding");
+    if (config.accessTeamDomain && config.accessClientId) {
+      setConfig({
+        baseUrl: config.baseUrl,
+        authToken: "",
+        accessTeamDomain: config.accessTeamDomain,
+        accessClientId: config.accessClientId,
+      });
+      setViewMode("settings");
+    } else {
+      setConfig(DEFAULT_CONFIG);
+      setViewMode("onboarding");
+    }
     void clearStoredConnectionConfig().then((cleared) => {
       if (!cleared.ok) {
         setErrorBanner(cleared.error);

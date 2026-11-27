@@ -98,8 +98,7 @@ export function SettingsPane({
     );
   };
 
-  const isSignedIn =
-    config.authToken.trim().length > 0 && connectionState !== "disconnected";
+  const isSignedIn = config.authToken.trim().length > 0;
 
   return (
     <View style={styles.container}>

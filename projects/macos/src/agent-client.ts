@@ -72,13 +72,16 @@ function extractTextContent(content: unknown): string {
     .join("\n");
 }
 
+type ReactNativeWebSocketConstructor = new (
+  url: string,
+  protocols?: string | string[] | null,
+  options?: { readonly headers?: Record<string, string> },
+) => WebSocket;
+
 function makeWsUrl(config: ConnectionConfig): string {
   const cleanBase = config.baseUrl.replace(/\/$/, "");
   const wsBase = cleanBase.replace(/^http/, "ws");
-  const tokenQuery = config.authToken
-    ? `?token=${encodeURIComponent(config.authToken)}`
-    : "";
-  return `${wsBase}/api/agents/${encodeURIComponent(config.agentId)}/ws${tokenQuery}`;
+  return `${wsBase}/api/agents/${encodeURIComponent(config.agentId)}/ws`;
 }
 
 async function requestJson<T>(
@@ -132,7 +135,15 @@ export class AgentClient {
   connect(): void {
     this.disconnect();
     this.#handlers.onConnectionChange("connecting");
-    const socket = new WebSocket(makeWsUrl(this.#config));
+    const WebSocketWithHeaders =
+      WebSocket as unknown as ReactNativeWebSocketConstructor;
+    const headers: Record<string, string> = {};
+    if (this.#config.authToken) {
+      headers.Authorization = `Bearer ${this.#config.authToken}`;
+    }
+    const socket = new WebSocketWithHeaders(makeWsUrl(this.#config), null, {
+      headers,
+    });
     this.#socket = socket;
 
     socket.onopen = () => {

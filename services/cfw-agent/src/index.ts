@@ -4,14 +4,10 @@ export { PersonalAgent } from "./agent";
 
 function isAuthorized(request: Request, env: Env): boolean {
   if (!env.AUTH_TOKEN) {
-    return true;
+    return false;
   }
   const auth = request.headers.get("Authorization");
-  if (auth === `Bearer ${env.AUTH_TOKEN}`) {
-    return true;
-  }
-  const url = new URL(request.url);
-  return url.searchParams.get("token") === env.AUTH_TOKEN;
+  return auth === `Bearer ${env.AUTH_TOKEN}`;
 }
 
 function withCors(response: Response): Response {

@@ -98,6 +98,8 @@ export function SettingsPane({
     );
   };
 
+  const isSignedIn = config.authToken.trim().length > 0;
+
   return (
     <View style={styles.container}>
       <View style={styles.column}>
@@ -120,33 +122,39 @@ export function SettingsPane({
         </View>
 
         <View style={styles.actions}>
-          <Pressable
-            style={styles.primaryButton}
-            onPress={() => {
-              void handleSignIn();
-            }}
-          >
-            <Text style={styles.primaryButtonText}>Sign In</Text>
-          </Pressable>
-          {config.refreshToken ? (
+          {isSignedIn ? (
+            <>
+              {config.refreshToken ? (
+                <Pressable
+                  style={styles.secondaryButton}
+                  onPress={() => {
+                    void handleRefreshSession();
+                  }}
+                >
+                  <Text style={styles.secondaryButtonText}>Refresh</Text>
+                </Pressable>
+              ) : null}
+              <Pressable style={styles.destructiveButton} onPress={onSignOut}>
+                <Text style={styles.destructiveButtonText}>Sign Out</Text>
+              </Pressable>
+            </>
+          ) : (
             <Pressable
-              style={styles.secondaryButton}
+              style={styles.primaryButton}
               onPress={() => {
-                void handleRefreshSession();
+                void handleSignIn();
               }}
             >
-              <Text style={styles.secondaryButtonText}>Refresh</Text>
+              <Text style={styles.primaryButtonText}>Sign In</Text>
             </Pressable>
-          ) : null}
-          <Pressable style={styles.destructiveButton} onPress={onSignOut}>
-            <Text style={styles.destructiveButtonText}>Sign Out</Text>
-          </Pressable>
+          )}
         </View>
 
-        {statusMessage ? (
+        {errorText ? (
+          <Text style={styles.error}>{errorText}</Text>
+        ) : statusMessage ? (
           <Text style={styles.status}>{statusMessage}</Text>
         ) : null}
-        {errorText ? <Text style={styles.error}>{errorText}</Text> : null}
       </View>
     </View>
   );

@@ -21,8 +21,6 @@ import { THEME } from "../theme";
 
 type OnboardingStep = "connect" | "deploy" | "access_login";
 
-const LOCAL_DEV_URL = "http://127.0.0.1:8787";
-
 type OnboardingViewProps = {
   readonly onComplete: (config: ConnectionConfig) => void;
 };
@@ -37,19 +35,14 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
 
-  const verifyLiveWorker = async (
-    candidateUrl: string,
-    fallbackToDeploy: boolean,
-  ) => {
+  const verifyLiveWorker = async (candidateUrl: string) => {
     setStatusMessage("Connecting...");
     const status = await fetchWorkerStatus(candidateUrl);
     switch (status.kind) {
       case "offline":
         setStatusMessage(null);
         setErrorText(status.reason);
-        if (fallbackToDeploy) {
-          setStep("deploy");
-        }
+        setStep("deploy");
         return;
       case "live_no_oauth":
         setStatusMessage(null);
@@ -95,7 +88,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
         setCfApiToken("");
         setNearAiApiKey("");
         setWorkerUrl(discovery.baseUrl);
-        await verifyLiveWorker(discovery.baseUrl, true);
+        await verifyLiveWorker(discovery.baseUrl);
         return;
       }
       case "not_deployed":
@@ -243,15 +236,6 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
           <Text style={styles.status}>{statusMessage}</Text>
         ) : null}
         {errorText ? <Text style={styles.error}>{errorText}</Text> : null}
-
-        <Pressable
-          style={styles.localLink}
-          onPress={() => {
-            void verifyLiveWorker(LOCAL_DEV_URL, false);
-          }}
-        >
-          <Text style={styles.localText}>Use local server</Text>
-        </Pressable>
       </View>
     </View>
   );

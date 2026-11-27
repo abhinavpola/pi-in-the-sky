@@ -3,10 +3,11 @@ import {
   type ConnectionConfig,
   type ConnectionState,
 } from "@pi-in-the-sky/client/agent-client";
-import type {
-  ActivityRecord,
-  ChatMessage,
-  TakeoverRecord,
+import {
+  type ActivityRecord,
+  type ChatMessage,
+  LOCAL_DEV_AUTH_TOKEN,
+  type TakeoverRecord,
 } from "@pi-in-the-sky/client/protocol";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
@@ -91,6 +92,16 @@ export function App() {
       if (result.value && result.value.authToken.trim().length > 0) {
         setConfig(result.value);
         client.updateConfig(result.value);
+        setViewMode("stream");
+        return;
+      }
+      if (__DEV__) {
+        const devConfig: ConnectionConfig = {
+          baseUrl: DEFAULT_CONFIG.baseUrl,
+          authToken: LOCAL_DEV_AUTH_TOKEN,
+        };
+        setConfig(devConfig);
+        client.updateConfig(devConfig);
         setViewMode("stream");
       }
     });

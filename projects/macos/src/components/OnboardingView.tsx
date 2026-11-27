@@ -13,7 +13,14 @@ import {
 } from "@pi-in-the-sky/client/onboarding";
 import { LOCAL_DEV_AUTH_TOKEN } from "@pi-in-the-sky/client/protocol";
 import { useEffect, useRef, useState } from "react";
-import { Linking, Pressable, Text, TextInput, View } from "react-native";
+import {
+  Linking,
+  Pressable,
+  ScrollView,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 
 import { signInWithCloudflareAccess } from "../native";
 import { THEME } from "../theme";
@@ -43,10 +50,12 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
   const [errorText, setErrorText] = useState<string | null>(null);
   const pollAbortRef = useRef<AbortController | null>(null);
   const flowEpochRef = useRef(0);
+  const configuringRef = useRef(false);
 
   useEffect(() => {
     return () => {
       flowEpochRef.current += 1;
+      configuringRef.current = false;
       pollAbortRef.current?.abort();
     };
   }, []);
@@ -94,27 +103,32 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
     target: DiscoveredWorker,
     epoch: number,
   ) => {
-    if (flowEpochRef.current !== epoch) {
+    if (flowEpochRef.current !== epoch || configuringRef.current) {
       return;
     }
-    setErrorText(null);
-    setStatusMessage("Configuring...");
-    const provisioned = await provisionWorkerSecrets(
-      token,
-      target.accountId,
-      nearAiApiKey,
-    );
-    if (flowEpochRef.current !== epoch) {
-      return;
+    configuringRef.current = true;
+    try {
+      setErrorText(null);
+      setStatusMessage("Configuring...");
+      const provisioned = await provisionWorkerSecrets(
+        token,
+        target.accountId,
+        nearAiApiKey,
+      );
+      if (flowEpochRef.current !== epoch) {
+        return;
+      }
+      if (!provisioned.ok) {
+        setStatusMessage(null);
+        setErrorText(provisioned.error);
+        setStep("connect");
+        return;
+      }
+      setWorkerUrl(target.baseUrl);
+      await verifyLiveWorker(target.baseUrl, epoch);
+    } finally {
+      configuringRef.current = false;
     }
-    if (!provisioned.ok) {
-      setStatusMessage(null);
-      setErrorText(provisioned.error);
-      setStep("connect");
-      return;
-    }
-    setWorkerUrl(target.baseUrl);
-    await verifyLiveWorker(target.baseUrl, epoch);
   };
 
   const discoverAndConfigure = async (token: string, epoch: number) => {
@@ -203,6 +217,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
 
   const handleCancelFlow = () => {
     flowEpochRef.current += 1;
+    configuringRef.current = false;
     pollAbortRef.current?.abort();
     pollAbortRef.current = null;
     setDeviceAuth(null);
@@ -303,21 +318,29 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
             <Text style={onboardingStyles.cardBody}>
               Confirm which Cloudflare account should receive your NEAR AI key.
             </Text>
-            {matchedWorkers.map((match) => (
-              <Pressable
-                key={match.accountId}
-                style={onboardingStyles.accountOption}
-                onPress={() => {
-                  const epoch = flowEpochRef.current;
-                  void configureWorker(cfAccessToken, match, epoch);
-                }}
-              >
-                <Text style={onboardingStyles.accountName}>
-                  {match.accountName}
-                </Text>
-                <Text style={onboardingStyles.accountUrl}>{match.baseUrl}</Text>
-              </Pressable>
-            ))}
+            <ScrollView
+              style={onboardingStyles.accountList}
+              contentContainerStyle={onboardingStyles.accountListContent}
+            >
+              {matchedWorkers.map((match) => (
+                <Pressable
+                  key={match.accountId}
+                  style={onboardingStyles.accountOption}
+                  disabled={statusMessage !== null}
+                  onPress={() => {
+                    const epoch = flowEpochRef.current;
+                    void configureWorker(cfAccessToken, match, epoch);
+                  }}
+                >
+                  <Text style={onboardingStyles.accountName}>
+                    {match.accountName}
+                  </Text>
+                  <Text style={onboardingStyles.accountUrl}>
+                    {match.baseUrl}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
             <Pressable
               style={onboardingStyles.localLink}
               onPress={handleCancelFlow}

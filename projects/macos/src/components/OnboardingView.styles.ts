@@ -60,6 +60,12 @@ export const onboardingStyles = StyleSheet.create({
     fontWeight: "600",
     letterSpacing: 3,
   },
+  accountList: {
+    maxHeight: 240,
+  },
+  accountListContent: {
+    gap: 10,
+  },
   accountOption: {
     backgroundColor: THEME.inputBg,
     borderRadius: 10,

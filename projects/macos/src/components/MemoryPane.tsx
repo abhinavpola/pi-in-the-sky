@@ -1,3 +1,5 @@
+import type { AgentClient } from "@pi-in-the-sky/client/agent-client";
+import type { MemoryNote, ProfileEntry } from "@pi-in-the-sky/client/protocol";
 import { useCallback, useEffect, useState } from "react";
 import {
   Pressable,
@@ -7,9 +9,6 @@ import {
   TextInput,
   View,
 } from "react-native";
-
-import type { AgentClient } from "../agent-client";
-import type { MemoryNote, ProfileEntry } from "../types";
 
 type MemoryPaneProps = {
   readonly client: AgentClient;

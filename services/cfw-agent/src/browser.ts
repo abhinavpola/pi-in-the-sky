@@ -5,8 +5,11 @@ import {
   type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { bool, obj, opt, str } from "@earendil-works/pi-schema";
+import {
+  type TakeoverRecord,
+  TakeoverRecordSchema,
+} from "@pi-in-the-sky/client/protocol";
 import { err } from "@pi-in-the-sky/result-monad";
-import { z } from "zod";
 
 import {
   fetchJsonWithBearer,
@@ -30,13 +33,8 @@ type TakeoverCheckpoint = {
   readonly takeoverId: string;
 };
 
-export type BrowserTakeoverRecord = {
-  readonly id: string;
+export type BrowserTakeoverRecord = TakeoverRecord & {
   readonly taskId: TaskId;
-  readonly url: string;
-  readonly liveViewUrl: string | null;
-  readonly reason: string;
-  readonly status: "waiting" | "resumed";
   readonly createdAt: number;
 };
 
@@ -49,14 +47,14 @@ type BrowserTakeoverRow = {
   id: string;
   task_id: TaskId;
   payload_enc: string;
-  status: "waiting" | "resumed";
+  status: TakeoverRecord["status"];
   created_at: number;
 };
 
-const TakeoverPayloadSchema = z.object({
-  url: z.string(),
-  liveViewUrl: z.string().nullable(),
-  reason: z.string(),
+const TakeoverPayloadSchema = TakeoverRecordSchema.pick({
+  url: true,
+  liveViewUrl: true,
+  reason: true,
 });
 
 export class BrowserStore {
@@ -85,12 +83,12 @@ export class BrowserStore {
     readonly reason: string;
   }): Promise<BrowserTakeoverRecord> {
     const createdAt = Date.now();
-    const encrypted = await this.#vault.encryptText(
-      JSON.stringify({
+    const encrypted = await this.#vault.encryptJson(
+      {
         url: input.url,
         liveViewUrl: input.liveViewUrl,
         reason: input.reason,
-      }),
+      },
       `browser_takeovers:${input.id}`,
     );
     this.#sql.exec(
@@ -110,11 +108,11 @@ export class BrowserStore {
   }
 
   async #toTakeover(row: BrowserTakeoverRow): Promise<BrowserTakeoverRecord> {
-    const decrypted = await this.#vault.decryptText(
+    const payload = await this.#vault.decryptJson(
       row.payload_enc,
       `browser_takeovers:${row.id}`,
+      TakeoverPayloadSchema,
     );
-    const payload = TakeoverPayloadSchema.parse(JSON.parse(decrypted));
     return {
       id: row.id,
       taskId: row.task_id,
@@ -146,11 +144,7 @@ export class BrowserStore {
         "SELECT id, task_id, payload_enc, status, created_at FROM browser_takeovers_vault WHERE status = 'waiting' ORDER BY created_at ASC",
       )
       .toArray();
-    const results: BrowserTakeoverRecord[] = [];
-    for (const row of rows) {
-      results.push(await this.#toTakeover(row));
-    }
-    return results;
+    return Promise.all(rows.map((row) => this.#toTakeover(row)));
   }
 
   markResumed(id: string): void {

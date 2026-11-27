@@ -14,7 +14,7 @@ type VaultMetaRow = {
   salt: string;
 };
 
-function toBase64(bytes: Uint8Array): string {
+export function toBase64(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) {
     binary += String.fromCharCode(byte);
@@ -236,6 +236,19 @@ export class VaultCipher {
     const parsed = EncryptedEnvelopeSchema.parse(JSON.parse(ciphertextJson));
     const plainBytes = await aesGcmDecrypt(dek, parsed.iv, parsed.ct, aad);
     return new TextDecoder().decode(plainBytes);
+  }
+
+  encryptJson(value: unknown, aad: string): Promise<string> {
+    return this.encryptText(JSON.stringify(value), aad);
+  }
+
+  async decryptJson<T>(
+    ciphertextJson: string,
+    aad: string,
+    schema: z.ZodType<T>,
+  ): Promise<T> {
+    const plain = await this.decryptText(ciphertextJson, aad);
+    return schema.parse(JSON.parse(plain));
   }
 
   async tryDecryptJsonEnvelope(

@@ -7,6 +7,11 @@ import type {
   WatchEnd,
 } from "@earendil-works/pi-durable";
 import {
+  type ActivityRecord,
+  type ClientMessage,
+  ClientMessageSchema,
+} from "@pi-in-the-sky/client/protocol";
+import {
   type PiHarness,
   type PiSessionId,
   ROOT_SESSION,
@@ -14,14 +19,8 @@ import {
 import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
 
-import type { ActivityRecord } from "./activities";
 import type { BrowserTakeoverRecord } from "./browser";
-import {
-  type ClientMessage,
-  ClientMessageSchema,
-  type CommandResult,
-  type ServerMessage,
-} from "./protocol";
+import type { CommandResult, ServerMessage } from "./protocol";
 
 const OPEN = 1;
 const SESSION_TAG_PREFIX = "pi-session:";
@@ -156,7 +155,10 @@ export class AgentSockets {
     ctx: ConnectionContext,
   ): Promise<void> {
     const session = sessionFromRequest(ctx.request, ROOT_SESSION);
-    const activities = await this.#callbacks.listActivities();
+    const [activities, takeovers] = await Promise.all([
+      this.#callbacks.listActivities(),
+      this.#callbacks.listWaitingTakeovers(),
+    ]);
     send(connection, {
       type: "hello",
       session,
@@ -169,7 +171,6 @@ export class AgentSockets {
         })),
       activities,
     });
-    const takeovers = await this.#callbacks.listWaitingTakeovers();
     for (const takeover of takeovers) {
       send(connection, { type: "takeover_requested", takeover });
     }
@@ -199,7 +200,7 @@ export class AgentSockets {
         return;
       }
       last = call.value;
-      send(socket, { type: "ops", ops: call.ops });
+      send(socket, { type: "view", view: call.value });
     });
     void watch.closed.then((end) =>
       this.#ended(socket, session, watch, end, last),

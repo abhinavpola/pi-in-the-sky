@@ -22,6 +22,7 @@
   "files": [],
   "references": [
     { "path": "packages/result-monad" },
+    { "path": "packages/client" },
     { "path": "services/cfw-agent" },
     { "path": "projects/macos" }
   ]

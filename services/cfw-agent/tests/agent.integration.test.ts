@@ -366,7 +366,7 @@ describe("cfw-agent workerd integration", () => {
 
     await nextSocketMessage(
       ws,
-      (m) => m.type === "ops" && JSON.stringify(m).includes(secretReplyPhrase),
+      (m) => m.type === "view" && JSON.stringify(m).includes(secretReplyPhrase),
       "final assistant message",
       10_000,
     );
@@ -459,7 +459,8 @@ describe("cfw-agent workerd integration", () => {
 
     const postTakeoverPromise = nextSocketMessage(
       ws,
-      (m) => m.type === "ops" && JSON.stringify(m).includes("Sign-in complete"),
+      (m) =>
+        m.type === "view" && JSON.stringify(m).includes("Sign-in complete"),
       "post-takeover assistant message",
       10_000,
     );

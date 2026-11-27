@@ -1,0 +1,296 @@
+import { z } from "zod";
+
+import { AuthConfigResponseSchema } from "./protocol";
+
+const REPO_URL = "https://github.com/abhinavpola/pi-in-the-sky";
+const DEFAULT_WORKER_NAME = "pi-in-the-sky";
+
+export const DEPLOY_TO_CLOUDFLARE_URL = `https://deploy.workers.cloudflare.com/?url=${encodeURIComponent(REPO_URL)}`;
+const ACCESS_REDIRECT_URI = "piinthesky://auth/callback";
+
+const SubdomainResponseSchema = z.object({
+  result: z.object({
+    subdomain: z.string().min(1),
+  }),
+});
+
+const OAuthTokenResponseSchema = z.object({
+  access_token: z.string().min(1),
+  refresh_token: z.string().min(1).optional(),
+});
+
+type WorkerStatus =
+  | { readonly kind: "offline"; readonly reason: string }
+  | { readonly kind: "live_no_oauth"; readonly baseUrl: string }
+  | {
+      readonly kind: "live_oauth_ready";
+      readonly baseUrl: string;
+      readonly teamDomain: string;
+      readonly clientId: string;
+    };
+
+type WorkerDiscoveryResult =
+  | { readonly kind: "found"; readonly baseUrl: string }
+  | { readonly kind: "not_deployed" }
+  | { readonly kind: "error"; readonly message: string };
+
+type OAuthTokenResult =
+  | {
+      readonly ok: true;
+      readonly accessToken: string;
+      readonly refreshToken?: string;
+    }
+  | { readonly ok: false; readonly error: string };
+
+type OAuthCallbackResult =
+  | {
+      readonly kind: "code";
+      readonly code: string;
+      readonly state: string | null;
+    }
+  | { readonly kind: "error"; readonly message: string }
+  | { readonly kind: "ignore" };
+
+function normalizeTeamOrigin(teamDomain: string): string {
+  const trimmed = teamDomain.trim().replace(/\/$/, "");
+  return trimmed.startsWith("https://") ? trimmed : `https://${trimmed}`;
+}
+
+function encodeFormBody(entries: Record<string, string>): string {
+  return Object.entries(entries)
+    .map(
+      ([key, value]) =>
+        `${encodeURIComponent(key)}=${encodeURIComponent(value)}`,
+    )
+    .join("&");
+}
+
+function parseQueryParams(url: string): Map<string, string> {
+  const queryStart = url.indexOf("?");
+  const params = new Map<string, string>();
+  if (queryStart === -1) {
+    return params;
+  }
+  const hashStart = url.indexOf("#", queryStart);
+  const query =
+    hashStart === -1
+      ? url.slice(queryStart + 1)
+      : url.slice(queryStart + 1, hashStart);
+  for (const part of query.split("&")) {
+    if (!part) {
+      continue;
+    }
+    const eqIdx = part.indexOf("=");
+    if (eqIdx === -1) {
+      params.set(decodeURIComponent(part), "");
+    } else {
+      params.set(
+        decodeURIComponent(part.slice(0, eqIdx)),
+        decodeURIComponent(part.slice(eqIdx + 1)),
+      );
+    }
+  }
+  return params;
+}
+
+export function buildAccessAuthorizeUrl(
+  teamDomain: string,
+  clientId: string,
+  state?: string,
+): string {
+  const origin = normalizeTeamOrigin(teamDomain);
+  const params: Record<string, string> = {
+    client_id: clientId,
+    response_type: "code",
+    redirect_uri: ACCESS_REDIRECT_URI,
+    scope: "openid email profile offline_access",
+  };
+  if (state) {
+    params.state = state;
+  }
+  return `${origin}/cdn-cgi/access/sso/oauth2/auth?${encodeFormBody(params)}`;
+}
+
+export function parseOAuthCallbackUrl(url: string): OAuthCallbackResult {
+  if (!url.startsWith(ACCESS_REDIRECT_URI)) {
+    return { kind: "ignore" };
+  }
+  try {
+    const params = parseQueryParams(url);
+    const error = params.get("error");
+    if (error) {
+      const desc = params.get("error_description") ?? error;
+      return { kind: "error", message: desc };
+    }
+    const code = params.get("code");
+    if (!code) {
+      return {
+        kind: "error",
+        message: "Missing authorization code in callback.",
+      };
+    }
+    return {
+      kind: "code",
+      code,
+      state: params.get("state") ?? null,
+    };
+  } catch {
+    return { kind: "error", message: "Malformed OAuth callback URL." };
+  }
+}
+
+async function postTokenEndpoint(
+  teamDomain: string,
+  params: Record<string, string>,
+  fallbackRefreshToken?: string,
+): Promise<OAuthTokenResult> {
+  const origin = normalizeTeamOrigin(teamDomain);
+  try {
+    const response = await fetch(`${origin}/cdn-cgi/access/sso/oauth2/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: encodeFormBody(params),
+    });
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: `OAuth token request failed (${response.status})`,
+      };
+    }
+    const parsed = OAuthTokenResponseSchema.safeParse(await response.json());
+    if (!parsed.success) {
+      return { ok: false, error: "Invalid OAuth token response." };
+    }
+    return {
+      ok: true,
+      accessToken: parsed.data.access_token,
+      refreshToken: parsed.data.refresh_token ?? fallbackRefreshToken,
+    };
+  } catch (thrown) {
+    return {
+      ok: false,
+      error: thrown instanceof Error ? thrown.message : String(thrown),
+    };
+  }
+}
+
+export function exchangeAuthorizationCode(
+  teamDomain: string,
+  clientId: string,
+  code: string,
+): Promise<OAuthTokenResult> {
+  return postTokenEndpoint(teamDomain, {
+    grant_type: "authorization_code",
+    client_id: clientId,
+    code,
+    redirect_uri: ACCESS_REDIRECT_URI,
+  });
+}
+
+export function refreshAccessToken(
+  teamDomain: string,
+  clientId: string,
+  refreshToken: string,
+): Promise<OAuthTokenResult> {
+  return postTokenEndpoint(
+    teamDomain,
+    {
+      grant_type: "refresh_token",
+      client_id: clientId,
+      refresh_token: refreshToken,
+    },
+    refreshToken,
+  );
+}
+
+export async function fetchWorkerStatus(
+  baseUrl: string,
+): Promise<WorkerStatus> {
+  const cleanUrl = baseUrl.replace(/\/$/, "");
+  try {
+    const [health, authRes] = await Promise.all([
+      fetch(`${cleanUrl}/health`),
+      fetch(`${cleanUrl}/auth/config`),
+    ]);
+    if (!health.ok) {
+      return {
+        kind: "offline",
+        reason: `Health check returned HTTP ${health.status}`,
+      };
+    }
+    if (!authRes.ok) {
+      return { kind: "live_no_oauth", baseUrl: cleanUrl };
+    }
+    const parsed = AuthConfigResponseSchema.safeParse(await authRes.json());
+    if (
+      parsed.success &&
+      parsed.data.provider === "cloudflare_access_oauth" &&
+      parsed.data.teamDomain &&
+      parsed.data.clientId
+    ) {
+      return {
+        kind: "live_oauth_ready",
+        baseUrl: cleanUrl,
+        teamDomain: parsed.data.teamDomain,
+        clientId: parsed.data.clientId,
+      };
+    }
+    return { kind: "live_no_oauth", baseUrl: cleanUrl };
+  } catch (thrown) {
+    return {
+      kind: "offline",
+      reason: thrown instanceof Error ? thrown.message : String(thrown),
+    };
+  }
+}
+
+export async function discoverCloudflareWorker(
+  cfApiToken: string,
+  accountId: string,
+): Promise<WorkerDiscoveryResult> {
+  const headers = { Authorization: `Bearer ${cfApiToken.trim()}` };
+  const cleanAccount = encodeURIComponent(accountId.trim());
+  try {
+    const [scriptRes, subRes] = await Promise.all([
+      fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/scripts/${DEFAULT_WORKER_NAME}`,
+        { headers },
+      ),
+      fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/subdomain`,
+        { headers },
+      ),
+    ]);
+    if (scriptRes.status === 404) {
+      return { kind: "not_deployed" };
+    }
+    if (!scriptRes.ok) {
+      return {
+        kind: "error",
+        message: `Cloudflare API returned HTTP ${scriptRes.status}`,
+      };
+    }
+    if (!subRes.ok) {
+      return {
+        kind: "error",
+        message: `Could not read workers.dev subdomain (HTTP ${subRes.status})`,
+      };
+    }
+    const parsed = SubdomainResponseSchema.safeParse(await subRes.json());
+    if (!parsed.success) {
+      return {
+        kind: "error",
+        message: "Unexpected Cloudflare subdomain shape.",
+      };
+    }
+    return {
+      kind: "found",
+      baseUrl: `https://${DEFAULT_WORKER_NAME}.${parsed.data.result.subdomain}.workers.dev`,
+    };
+  } catch (thrown) {
+    return {
+      kind: "error",
+      message: thrown instanceof Error ? thrown.message : String(thrown),
+    };
+  }
+}

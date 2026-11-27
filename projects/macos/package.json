@@ -8,7 +8,7 @@
     "start": "react-native start"
   },
   "dependencies": {
-    "@pi-in-the-sky/result-monad": "workspace:*",
+    "@pi-in-the-sky/client": "workspace:*",
     "react": "19.2.4",
     "react-native": "0.83.10",
     "react-native-macos": "0.83.0"

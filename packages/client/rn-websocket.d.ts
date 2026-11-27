@@ -1,9 +1,9 @@
 declare global {
   interface WebSocketConstructor {
     new (
-      url: string | URL,
+      url: string,
       protocols?: string | string[] | null,
-      options?: { readonly headers?: Record<string, string> },
+      options?: { headers?: Record<string, string> },
     ): WebSocket;
   }
 

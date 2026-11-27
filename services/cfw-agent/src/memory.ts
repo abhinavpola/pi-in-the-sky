@@ -1,21 +1,9 @@
 import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { num, obj, opt, str } from "@earendil-works/pi-schema";
+import type { MemoryNote, ProfileEntry } from "@pi-in-the-sky/client/protocol";
 
+import { jsonToolResult } from "./http-tool";
 import type { VaultCipher } from "./vault";
-
-export type ProfileEntry = {
-  readonly key: string;
-  readonly value: string;
-  readonly updatedAt: number;
-};
-
-export type MemoryNote = {
-  readonly id: number;
-  readonly date: string;
-  readonly category: string;
-  readonly content: string;
-  readonly createdAt: number;
-};
 
 type ProfileRow = {
   key: string;
@@ -65,19 +53,16 @@ export class MemoryStore {
         "SELECT key, value_enc, updated_at FROM user_profile_vault ORDER BY key ASC",
       )
       .toArray();
-    const entries: ProfileEntry[] = [];
-    for (const row of rows) {
-      const value = await this.#vault.decryptText(
-        row.value_enc,
-        `user_profile:${row.key}`,
-      );
-      entries.push({
+    return Promise.all(
+      rows.map(async (row) => ({
         key: row.key,
-        value,
+        value: await this.#vault.decryptText(
+          row.value_enc,
+          `user_profile:${row.key}`,
+        ),
         updatedAt: row.updated_at,
-      });
-    }
-    return entries;
+      })),
+    );
   }
 
   async setProfileEntry(key: string, value: string): Promise<ProfileEntry> {
@@ -136,30 +121,27 @@ export class MemoryStore {
       )
       .toArray();
     const tokens = trimmed ? trimmed.split(/\s+/).filter(Boolean) : [];
-    const results: MemoryNote[] = [];
-    for (const row of rows) {
-      const content = await this.#vault.decryptText(
-        row.content_enc,
-        `memory_notes:${row.date}:${row.category}`,
-      );
-      if (tokens.length > 0) {
-        const haystack = `${row.date} ${row.category} ${content}`.toLowerCase();
-        if (!tokens.every((token) => haystack.includes(token))) {
-          continue;
-        }
-      }
-      results.push({
+    const decrypted = await Promise.all(
+      rows.map(async (row): Promise<MemoryNote> => ({
         id: row.id,
         date: row.date,
         category: row.category,
-        content,
+        content: await this.#vault.decryptText(
+          row.content_enc,
+          `memory_notes:${row.date}:${row.category}`,
+        ),
         createdAt: row.created_at,
-      });
-      if (results.length >= clampedLimit) {
-        break;
-      }
-    }
-    return results;
+      })),
+    );
+    const filtered =
+      tokens.length === 0
+        ? decrypted
+        : decrypted.filter((note) => {
+            const haystack =
+              `${note.date} ${note.category} ${note.content}`.toLowerCase();
+            return tokens.every((token) => haystack.includes(token));
+          });
+    return filtered.slice(0, clampedLimit);
   }
 
   async renderProfileSummary(): Promise<string> {
@@ -197,10 +179,7 @@ export function createMemoryExtension(store: MemoryStore): Extension {
     parameters: EmptySchema,
     replay: "safe",
     async execute() {
-      const entries = await store.getProfile();
-      return {
-        output: [{ type: "text", text: JSON.stringify({ entries }) }],
-      };
+      return jsonToolResult({ entries: await store.getProfile() });
     },
   };
 
@@ -211,10 +190,7 @@ export function createMemoryExtension(store: MemoryStore): Extension {
     parameters: SetProfileSchema,
     replay: "safe",
     async execute({ key, value }) {
-      const entry = await store.setProfileEntry(key, value);
-      return {
-        output: [{ type: "text", text: JSON.stringify(entry) }],
-      };
+      return jsonToolResult(await store.setProfileEntry(key, value));
     },
   };
 
@@ -225,10 +201,9 @@ export function createMemoryExtension(store: MemoryStore): Extension {
     parameters: WriteNoteSchema,
     replay: "safe",
     async execute({ content, category, date }) {
-      const note = await store.addNote(content, category ?? "general", date);
-      return {
-        output: [{ type: "text", text: JSON.stringify(note) }],
-      };
+      return jsonToolResult(
+        await store.addNote(content, category ?? "general", date),
+      );
     },
   };
 
@@ -239,10 +214,9 @@ export function createMemoryExtension(store: MemoryStore): Extension {
     parameters: SearchMemorySchema,
     replay: "safe",
     async execute({ query, limit }) {
-      const notes = await store.searchNotes(query, limit ?? 10);
-      return {
-        output: [{ type: "text", text: JSON.stringify({ notes }) }],
-      };
+      return jsonToolResult({
+        notes: await store.searchNotes(query, limit ?? 10),
+      });
     },
   };
 

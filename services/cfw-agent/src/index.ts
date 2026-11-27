@@ -1,12 +1,8 @@
 import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
-import {
-  PiHarness,
-  type PiModel,
-  type PiReceipt,
-  ROOT_SESSION,
-} from "agents/harness/pi";
+import { AuthConfigResponseSchema } from "@pi-in-the-sky/client/protocol";
+import { PiHarness, type PiModel, ROOT_SESSION } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
 import { DurableObject } from "cloudflare:workers";
@@ -19,18 +15,9 @@ import {
   BrowserTakeoverSignal,
   createBrowserExtension,
 } from "./browser";
-import {
-  type ConnectorProvider,
-  ConnectorStore,
-  createConnectorsExtension,
-} from "./connectors";
+import { ConnectorStore, createConnectorsExtension } from "./connectors";
 import type { HttpFetcher } from "./http-tool";
-import {
-  createMemoryExtension,
-  type MemoryNote,
-  MemoryStore,
-  type ProfileEntry,
-} from "./memory";
+import { createMemoryExtension, MemoryStore } from "./memory";
 import { createNearAiProvider, DEFAULT_NEARAI_MODEL } from "./providers";
 import { handleAgentHttpRequest } from "./routes";
 import { createSkillsExtension } from "./skills";
@@ -220,50 +207,6 @@ export class PersonalAgent extends DurableObject<Env> {
     await this.sockets.reattach();
   }
 
-  submitPrompt(
-    input: string,
-    options?: { readonly operationId?: string; readonly session?: string },
-  ): Promise<PiReceipt> {
-    return this.harness.submit(input, {
-      operationId: options?.operationId,
-      session: options?.session,
-    });
-  }
-
-  getProfile(): Promise<ProfileEntry[]> {
-    return this.memory.getProfile();
-  }
-
-  setProfileEntry(key: string, value: string): Promise<ProfileEntry> {
-    return this.memory.setProfileEntry(key, value);
-  }
-
-  searchMemoryNotes(query: string, limit = 10): Promise<MemoryNote[]> {
-    return this.memory.searchNotes(query, limit);
-  }
-
-  writeMemoryNote(
-    content: string,
-    category = "general",
-    date?: string,
-  ): Promise<MemoryNote> {
-    return this.memory.addNote(content, category, date);
-  }
-
-  setConnectorToken(
-    provider: ConnectorProvider,
-    accessToken: string,
-    refreshToken?: string,
-    expiresAt?: number,
-  ): Promise<void> {
-    return this.connectors.setToken(
-      provider,
-      accessToken,
-      refreshToken,
-      expiresAt,
-    );
-  }
-
   async resumeTakeover(
     takeoverId: string,
     note?: string,
@@ -342,23 +285,7 @@ export class PersonalAgent extends DurableObject<Env> {
       request.method !== "GET" && request.method !== "HEAD"
         ? await request.text()
         : "";
-
-    return handleAgentHttpRequest(request, bodyText, {
-      listActivities: () => this.activities.listActivities(),
-      steerActivity: (activityId, instruction) =>
-        this.steerActivity(activityId, instruction),
-      compactThread: (summary) => this.compactThread(summary),
-      submitPrompt: (input, options) => this.submitPrompt(input, options),
-      getProfile: () => this.getProfile(),
-      setProfileEntry: (key, value) => this.setProfileEntry(key, value),
-      setConnectorToken: (provider, accessToken, refreshToken, expiresAt) =>
-        this.setConnectorToken(provider, accessToken, refreshToken, expiresAt),
-      searchMemoryNotes: (query) => this.searchMemoryNotes(query),
-      writeMemoryNote: (content, category, date) =>
-        this.writeMemoryNote(content, category, date),
-      resumeTakeover: (takeoverId, note) =>
-        this.resumeTakeover(takeoverId, note),
-    });
+    return handleAgentHttpRequest(request, bodyText, this);
   }
 }
 
@@ -376,14 +303,13 @@ export default {
 
     if (url.pathname === "/auth/config") {
       const enabled = Boolean(env.CF_ACCESS_TEAM_DOMAIN && env.CF_ACCESS_AUD);
-      return withCors(
-        Response.json({
-          provider: enabled ? "cloudflare_access_oauth" : "none",
-          teamDomain: env.CF_ACCESS_TEAM_DOMAIN ?? null,
-          aud: env.CF_ACCESS_AUD ?? null,
-          clientId: env.CF_ACCESS_OAUTH_CLIENT_ID ?? null,
-        }),
-      );
+      const payload = AuthConfigResponseSchema.parse({
+        provider: enabled ? "cloudflare_access_oauth" : "none",
+        teamDomain: env.CF_ACCESS_TEAM_DOMAIN ?? null,
+        aud: env.CF_ACCESS_AUD ?? null,
+        clientId: env.CF_ACCESS_OAUTH_CLIENT_ID ?? null,
+      });
+      return withCors(Response.json(payload));
     }
 
     const identity = await verifyCloudflareAccessJwt(request, {

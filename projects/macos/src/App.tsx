@@ -1,23 +1,26 @@
+import {
+  AgentClient,
+  type ConnectionConfig,
+  type ConnectionState,
+} from "@pi-in-the-sky/client/agent-client";
+import type {
+  ActivityRecord,
+  ChatMessage,
+  TakeoverRecord,
+} from "@pi-in-the-sky/client/protocol";
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
 
-import { AgentClient } from "./agent-client";
 import { MemoryPane } from "./components/MemoryPane";
 import { OnboardingView } from "./components/OnboardingView";
 import { SettingsPane } from "./components/SettingsPane";
 import { StreamView } from "./components/StreamView";
-import type {
-  ActivityItem,
-  ChatMessage,
-  ConnectionConfig,
-  ConnectionState,
-  TakeoverItem,
-  ViewMode,
-} from "./types";
+
+type ViewMode = "onboarding" | "stream" | "memory" | "settings";
 
 const DEFAULT_CONFIG: ConnectionConfig = {
   baseUrl: "http://127.0.0.1:8787",
-  agentId: "personal",
+  agentId: "me",
   authToken: "",
 };
 
@@ -28,8 +31,8 @@ export function App() {
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("disconnected");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [activities, setActivities] = useState<ActivityItem[]>([]);
-  const [activeTakeovers, setActiveTakeovers] = useState<TakeoverItem[]>([]);
+  const [activities, setActivities] = useState<ActivityRecord[]>([]);
+  const [activeTakeovers, setActiveTakeovers] = useState<TakeoverRecord[]>([]);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
   const client = useMemo(
@@ -48,6 +51,7 @@ export function App() {
           setActiveTakeovers([]);
         },
         onError: setErrorBanner,
+        createSocket: (url, headers) => new WebSocket(url, null, { headers }),
       }),
     [],
   );

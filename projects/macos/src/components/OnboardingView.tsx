@@ -1,4 +1,16 @@
-import { useState } from "react";
+import {
+  type ConnectionConfig,
+  validateBaseUrl,
+} from "@pi-in-the-sky/client/agent-client";
+import {
+  buildAccessAuthorizeUrl,
+  DEPLOY_TO_CLOUDFLARE_URL,
+  discoverCloudflareWorker,
+  exchangeAuthorizationCode,
+  fetchWorkerStatus,
+  parseOAuthCallbackUrl,
+} from "@pi-in-the-sky/client/onboarding";
+import { useEffect, useState } from "react";
 import {
   Linking,
   Pressable,
@@ -7,15 +19,6 @@ import {
   TextInput,
   View,
 } from "react-native";
-
-import { validateBaseUrl } from "../agent-client";
-import {
-  buildAccessAuthorizeUrl,
-  DEPLOY_TO_CLOUDFLARE_URL,
-  discoverCloudflareWorker,
-  fetchWorkerStatus,
-} from "../onboarding";
-import type { ConnectionConfig } from "../types";
 
 type OnboardingStep = "discover" | "deploy" | "access_login";
 
@@ -36,8 +39,62 @@ export function OnboardingView({
   const [workerUrl, setWorkerUrl] = useState(initialBaseUrl);
   const [teamDomain, setTeamDomain] = useState("");
   const [clientId, setClientId] = useState("");
+  const [oauthState, setOauthState] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (step !== "access_login" || !teamDomain || !clientId) {
+      return;
+    }
+    const subscription = Linking.addEventListener("url", ({ url }) => {
+      const parsed = parseOAuthCallbackUrl(url);
+      switch (parsed.kind) {
+        case "ignore":
+          return;
+        case "error":
+          setStatusMessage(null);
+          setErrorText(parsed.message);
+          return;
+        case "code": {
+          if (oauthState && parsed.state !== oauthState) {
+            setStatusMessage(null);
+            setErrorText("OAuth state mismatch; please try signing in again.");
+            return;
+          }
+          setStatusMessage(
+            "Exchanging Cloudflare Access authorization code...",
+          );
+          void exchangeAuthorizationCode(
+            teamDomain,
+            clientId,
+            parsed.code,
+          ).then((tokenResult) => {
+            if (!tokenResult.ok) {
+              setStatusMessage(null);
+              setErrorText(tokenResult.error);
+              return;
+            }
+            onComplete({
+              baseUrl: workerUrl,
+              agentId: "me",
+              authToken: tokenResult.accessToken,
+              refreshToken: tokenResult.refreshToken,
+              accessTeamDomain: teamDomain,
+              accessClientId: clientId,
+            });
+          });
+          return;
+        }
+        default: {
+          parsed satisfies never;
+        }
+      }
+    });
+    return () => {
+      subscription.remove();
+    };
+  }, [step, teamDomain, clientId, oauthState, workerUrl, onComplete]);
 
   const checkLiveness = async (candidateUrl: string) => {
     const validated = validateBaseUrl(candidateUrl);
@@ -115,18 +172,17 @@ export function OnboardingView({
 
   const handleAccessLogin = async () => {
     setErrorText(null);
-    const authorizeUrl = buildAccessAuthorizeUrl(teamDomain, clientId);
+    const nextState = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setOauthState(nextState);
+    const authorizeUrl = buildAccessAuthorizeUrl(
+      teamDomain,
+      clientId,
+      nextState,
+    );
     await Linking.openURL(authorizeUrl);
     setStatusMessage(
-      "Opened Cloudflare Access OAuth (with offline_access refresh token). Complete sign-in in your browser.",
+      "Waiting for Cloudflare Access sign-in callback (piinthesky://auth/callback)...",
     );
-    onComplete({
-      baseUrl: workerUrl,
-      agentId: "personal",
-      authToken: "",
-      accessTeamDomain: teamDomain,
-      accessClientId: clientId,
-    });
   };
 
   const renderStep = (current: OnboardingStep) => {

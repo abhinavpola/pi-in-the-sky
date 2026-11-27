@@ -1,3 +1,13 @@
+import {
+  type ConnectionConfig,
+  type ConnectionState,
+  validateBaseUrl,
+} from "@pi-in-the-sky/client/agent-client";
+import {
+  buildAccessAuthorizeUrl,
+  fetchWorkerStatus,
+  refreshAccessToken,
+} from "@pi-in-the-sky/client/onboarding";
 import { useState } from "react";
 import {
   Linking,
@@ -7,14 +17,6 @@ import {
   TextInput,
   View,
 } from "react-native";
-
-import { validateBaseUrl } from "../agent-client";
-import {
-  buildAccessAuthorizeUrl,
-  fetchWorkerStatus,
-  refreshAccessToken,
-} from "../onboarding";
-import type { ConnectionConfig, ConnectionState } from "../types";
 
 type SettingsPaneProps = {
   readonly config: ConnectionConfig;

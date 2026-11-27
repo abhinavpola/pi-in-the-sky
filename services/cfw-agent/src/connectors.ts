@@ -7,9 +7,10 @@ import {
   type HttpFetcher,
   toToolResult,
 } from "./http-tool";
-import type { VaultCipher } from "./vault";
+import { toBase64, type VaultCipher } from "./vault";
 
-export type ConnectorProvider = "gmail" | "google_calendar";
+export const ConnectorProviderSchema = z.enum(["gmail", "google_calendar"]);
+type ConnectorProvider = z.infer<typeof ConnectorProviderSchema>;
 
 type ConnectorConfig = {
   readonly gmailAccessToken?: string;
@@ -52,13 +53,12 @@ export class ConnectorStore {
     refreshToken?: string,
     expiresAt?: number,
   ): Promise<void> {
-    const payload = JSON.stringify({
-      accessToken,
-      refreshToken: refreshToken ?? null,
-      expiresAt: expiresAt ?? null,
-    });
-    const encrypted = await this.#vault.encryptText(
-      payload,
+    const encrypted = await this.#vault.encryptJson(
+      {
+        accessToken,
+        refreshToken: refreshToken ?? null,
+        expiresAt: expiresAt ?? null,
+      },
       `connector_tokens:${provider}`,
     );
     this.#sql.exec(
@@ -86,11 +86,11 @@ export class ConnectorStore {
     if (!row) {
       return undefined;
     }
-    const decrypted = await this.#vault.decryptText(
+    const parsed = await this.#vault.decryptJson(
       row.payload_enc,
       `connector_tokens:${provider}`,
+      StoredTokenPayloadSchema,
     );
-    const parsed = StoredTokenPayloadSchema.parse(JSON.parse(decrypted));
     return parsed.accessToken;
   }
 }
@@ -118,12 +118,7 @@ const CalendarListEventsSchema = obj({
 });
 
 function encodeBase64Url(input: string): string {
-  const bytes = new TextEncoder().encode(input);
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary)
+  return toBase64(new TextEncoder().encode(input))
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/, "");

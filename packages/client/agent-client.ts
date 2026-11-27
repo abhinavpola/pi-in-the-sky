@@ -1,31 +1,46 @@
 import { err, ok, type Result } from "@pi-in-the-sky/result-monad";
+import { z } from "zod";
 
 import {
+  type ActivityRecord,
+  type ChatMessage,
+  type ClientMessage,
   extractMessagesFromView,
-  isRecord,
-  parseIncomingSocketMessage,
-  parseMemoryNote,
-  parseProfileEntry,
-} from "./protocol-parsers";
-import type {
-  ActivityItem,
-  ChatMessage,
-  ConnectionConfig,
-  ConnectionState,
-  IncomingSocketMessage,
-  MemoryNote,
-  ProfileEntry,
-  TakeoverItem,
-} from "./types";
+  type IncomingSocketMessage,
+  IncomingSocketMessageSchema,
+  type MemoryNote,
+  MemoryNoteSchema,
+  type ProfileEntry,
+  ProfileEntrySchema,
+  type TakeoverRecord,
+} from "./protocol";
+
+export type ConnectionState = "disconnected" | "connecting" | "connected";
+
+export type ConnectionConfig = {
+  readonly baseUrl: string;
+  readonly agentId: string;
+  readonly authToken: string;
+  readonly refreshToken?: string;
+  readonly accessTeamDomain?: string;
+  readonly accessClientId?: string;
+};
 
 type ClientHandlers = {
   readonly onConnectionChange: (state: ConnectionState) => void;
   readonly onMessagesChange: (messages: ChatMessage[]) => void;
-  readonly onActivitiesChange: (activities: ActivityItem[]) => void;
-  readonly onTakeoverRequested: (takeover: TakeoverItem) => void;
+  readonly onActivitiesChange: (activities: ActivityRecord[]) => void;
+  readonly onTakeoverRequested: (takeover: TakeoverRecord) => void;
   readonly onReset: () => void;
   readonly onError: (message: string) => void;
+  readonly createSocket?: (
+    url: string,
+    headers: Record<string, string>,
+  ) => WebSocket;
 };
+
+const ProfileListSchema = z.object({ entries: z.array(ProfileEntrySchema) });
+const NotesListSchema = z.object({ notes: z.array(MemoryNoteSchema) });
 
 const BASE_URL_PATTERN =
   /^(https?):\/\/(\[[^\]]+\]|[^/:?#]+)(?::\d+)?(\/.*)?$/i;
@@ -47,25 +62,26 @@ export function validateBaseUrl(baseUrl: string): Result<string, string> {
     case "https":
       return ok(trimmed);
     case "http":
-      if (isLoopback) {
-        return ok(trimmed);
-      }
-      return err("Remote connections must use https://.");
+      return isLoopback
+        ? ok(trimmed)
+        : err("Remote connections must use https://.");
     default:
       return err("Server URL must use https:// (or http:// for localhost).");
   }
 }
 
-function makeWsUrl(config: ConnectionConfig): string {
-  const cleanBase = config.baseUrl.replace(/\/$/, "");
-  const wsBase = cleanBase.replace(/^http/, "ws");
-  return `${wsBase}/api/agents/${encodeURIComponent(config.agentId)}/ws`;
+function apiPrefix(config: ConnectionConfig): string {
+  const customId = config.agentId.trim();
+  if (!customId || customId === "me" || config.accessTeamDomain) {
+    return "/api/me";
+  }
+  return `/api/agents/${encodeURIComponent(customId)}`;
 }
 
 async function requestJson<T>(
   config: ConnectionConfig,
   path: string,
-  parse: (data: unknown) => T | null,
+  schema: z.ZodType<T>,
   init?: RequestInit,
 ): Promise<Result<T, string>> {
   const validated = validateBaseUrl(config.baseUrl);
@@ -73,7 +89,6 @@ async function requestJson<T>(
     return validated;
   }
   try {
-    const cleanBase = validated.value;
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
@@ -81,22 +96,18 @@ async function requestJson<T>(
       headers.Authorization = `Bearer ${config.authToken}`;
     }
     const response = await fetch(
-      `${cleanBase}/api/agents/${encodeURIComponent(config.agentId)}${path}`,
-      {
-        ...init,
-        headers,
-      },
+      `${validated.value}${apiPrefix(config)}${path}`,
+      { ...init, headers },
     );
     const text = await response.text();
     if (!response.ok) {
       return err(`HTTP ${response.status}: ${text}`);
     }
-    const raw: unknown = text ? JSON.parse(text) : {};
-    const parsed = parse(raw);
-    if (parsed === null) {
+    const parsed = schema.safeParse(text ? JSON.parse(text) : {});
+    if (!parsed.success) {
       return err("Unexpected response shape from agent.");
     }
-    return ok(parsed);
+    return ok(parsed.data);
   } catch (thrown) {
     return err(thrown instanceof Error ? thrown.message : String(thrown));
   }
@@ -107,7 +118,7 @@ export class AgentClient {
   readonly #handlers: ClientHandlers;
   #socket: WebSocket | null = null;
   #messages: ChatMessage[] = [];
-  #activities: ActivityItem[] = [];
+  #activities: ActivityRecord[] = [];
   #commandSeq = 0;
 
   constructor(config: ConnectionConfig, handlers: ClientHandlers) {
@@ -138,7 +149,11 @@ export class AgentClient {
     if (this.#config.authToken) {
       headers.Authorization = `Bearer ${this.#config.authToken}`;
     }
-    const socket = new WebSocket(makeWsUrl(this.#config), null, { headers });
+    const wsBase = validated.value.replace(/^http/, "ws");
+    const wsUrl = `${wsBase}${apiPrefix(this.#config)}/ws`;
+    const socket = this.#handlers.createSocket
+      ? this.#handlers.createSocket(wsUrl, headers)
+      : new WebSocket(wsUrl);
     this.#socket = socket;
 
     socket.onopen = () => {
@@ -148,11 +163,11 @@ export class AgentClient {
 
     socket.onmessage = (event) => {
       try {
-        const parsed = parseIncomingSocketMessage(
+        const parsed = IncomingSocketMessageSchema.safeParse(
           JSON.parse(String(event.data)),
         );
-        if (parsed) {
-          this.#handleIncoming(parsed);
+        if (parsed.success) {
+          this.#handleIncoming(parsed.data);
         }
       } catch {
         this.#handlers.onError("Received invalid JSON from agent.");
@@ -225,11 +240,7 @@ export class AgentClient {
   }
 
   compactThread(summary: string): void {
-    this.#send({
-      type: "compact",
-      id: this.#nextId("compact"),
-      summary,
-    });
+    this.#send({ type: "compact", id: this.#nextId("compact"), summary });
   }
 
   abort(): void {
@@ -246,45 +257,32 @@ export class AgentClient {
   }
 
   getProfile(): Promise<Result<{ entries: ProfileEntry[] }, string>> {
-    return requestJson(this.#config, "/profile", (raw) => {
-      if (!isRecord(raw) || !Array.isArray(raw.entries)) {
-        return null;
-      }
-      const entries = raw.entries
-        .map(parseProfileEntry)
-        .filter((item): item is ProfileEntry => item !== null);
-      return { entries };
-    });
+    return requestJson(this.#config, "/profile", ProfileListSchema);
   }
 
   setProfileEntry(
     key: string,
     value: string,
   ): Promise<Result<ProfileEntry, string>> {
-    return requestJson(this.#config, "/profile", parseProfileEntry, {
+    return requestJson(this.#config, "/profile", ProfileEntrySchema, {
       method: "PUT",
       body: JSON.stringify({ key, value }),
     });
   }
 
   searchNotes(query: string): Promise<Result<{ notes: MemoryNote[] }, string>> {
-    const encoded = encodeURIComponent(query);
-    return requestJson(this.#config, `/notes?q=${encoded}`, (raw) => {
-      if (!isRecord(raw) || !Array.isArray(raw.notes)) {
-        return null;
-      }
-      const notes = raw.notes
-        .map(parseMemoryNote)
-        .filter((item): item is MemoryNote => item !== null);
-      return { notes };
-    });
+    return requestJson(
+      this.#config,
+      `/notes?q=${encodeURIComponent(query)}`,
+      NotesListSchema,
+    );
   }
 
   addNote(
     content: string,
     category = "general",
   ): Promise<Result<MemoryNote, string>> {
-    return requestJson(this.#config, "/notes", parseMemoryNote, {
+    return requestJson(this.#config, "/notes", MemoryNoteSchema, {
       method: "POST",
       body: JSON.stringify({ content, category }),
     });
@@ -295,7 +293,7 @@ export class AgentClient {
     return `${prefix}-${Date.now()}-${this.#commandSeq}`;
   }
 
-  #send(payload: Record<string, unknown>): boolean {
+  #send(payload: ClientMessage): boolean {
     if (!this.#socket || this.#socket.readyState !== 1) {
       this.#handlers.onError("Not connected to agent.");
       return false;
@@ -306,11 +304,10 @@ export class AgentClient {
 
   #handleIncoming(message: IncomingSocketMessage): void {
     switch (message.type) {
-      case "hello": {
+      case "hello":
         this.#activities = [...message.activities];
         this.#handlers.onActivitiesChange(this.#activities);
         return;
-      }
       case "result":
         return;
       case "view": {
@@ -322,27 +319,19 @@ export class AgentClient {
         }
         return;
       }
-      case "ops": {
-        this.#send({ type: "watch", id: this.#nextId("resync") });
-        return;
-      }
-      case "takeover_requested": {
+      case "takeover_requested":
         this.#handlers.onTakeoverRequested(message.takeover);
         return;
-      }
-      case "activity_updated": {
-        const next = [
+      case "activity_updated":
+        this.#activities = [
           message.activity,
           ...this.#activities.filter((a) => a.id !== message.activity.id),
         ];
-        this.#activities = next;
         this.#handlers.onActivitiesChange(this.#activities);
         return;
-      }
-      case "error": {
+      case "error":
         this.#handlers.onError(message.message);
         return;
-      }
       default: {
         message satisfies never;
       }

@@ -1,3 +1,8 @@
+import type {
+  ActivityRecord,
+  ChatMessage,
+  TakeoverRecord,
+} from "@pi-in-the-sky/client/protocol";
 import { useState } from "react";
 import {
   Linking,
@@ -9,12 +14,10 @@ import {
   View,
 } from "react-native";
 
-import type { ActivityItem, ChatMessage, TakeoverItem } from "../types";
-
 type StreamViewProps = {
   readonly messages: readonly ChatMessage[];
-  readonly activities: readonly ActivityItem[];
-  readonly activeTakeovers: readonly TakeoverItem[];
+  readonly activities: readonly ActivityRecord[];
+  readonly activeTakeovers: readonly TakeoverRecord[];
   readonly showDrawer: boolean;
   readonly onSend: (text: string) => boolean;
   readonly onSteerActivity: (
@@ -27,7 +30,7 @@ type StreamViewProps = {
   readonly onResumeTakeover: (id: string) => void;
 };
 
-function statusBadgeLabel(status: ActivityItem["status"]): string {
+function statusBadgeLabel(status: ActivityRecord["status"]): string {
   switch (status) {
     case "running":
       return "RUNNING";

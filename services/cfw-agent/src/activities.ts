@@ -1,23 +1,14 @@
 import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { obj, opt, str } from "@earendil-works/pi-schema";
+import {
+  type ActivityRecord,
+  ActivityRecordSchema,
+  type ActivityStatus,
+} from "@pi-in-the-sky/client/protocol";
 import type { PiHarness, PiSessionId } from "agents/harness/pi";
-import { z } from "zod";
 
+import { errorToolResult, jsonToolResult } from "./http-tool";
 import type { VaultCipher } from "./vault";
-
-type ActivityStatus =
-  "running" | "waiting_input" | "completed" | "failed" | "cancelled";
-
-export type ActivityRecord = {
-  readonly id: string;
-  readonly sessionId: PiSessionId;
-  readonly title: string;
-  readonly summary: string;
-  readonly status: ActivityStatus;
-  readonly collapsed: boolean;
-  readonly createdAt: number;
-  readonly updatedAt: number;
-};
 
 type ActivityRow = {
   id: string;
@@ -29,9 +20,9 @@ type ActivityRow = {
   updated_at: number;
 };
 
-const ActivityPayloadSchema = z.object({
-  title: z.string(),
-  summary: z.string(),
+const ActivityPayloadSchema = ActivityRecordSchema.pick({
+  title: true,
+  summary: true,
 });
 
 export class ActivityStore {
@@ -61,8 +52,8 @@ export class ActivityStore {
     readonly summary: string;
   }): Promise<ActivityRecord> {
     const now = Date.now();
-    const encrypted = await this.#vault.encryptText(
-      JSON.stringify({ title: input.title, summary: input.summary }),
+    const encrypted = await this.#vault.encryptJson(
+      { title: input.title, summary: input.summary },
       `activities:${input.id}`,
     );
     this.#sql.exec(
@@ -88,11 +79,11 @@ export class ActivityStore {
   }
 
   async #toRecord(row: ActivityRow): Promise<ActivityRecord> {
-    const decrypted = await this.#vault.decryptText(
+    const payload = await this.#vault.decryptJson(
       row.payload_enc,
       `activities:${row.id}`,
+      ActivityPayloadSchema,
     );
-    const payload = ActivityPayloadSchema.parse(JSON.parse(decrypted));
     return {
       id: row.id,
       sessionId: row.session_id,
@@ -126,11 +117,7 @@ export class ActivityStore {
         clamped,
       )
       .toArray();
-    const results: ActivityRecord[] = [];
-    for (const row of rows) {
-      results.push(await this.#toRecord(row));
-    }
-    return results;
+    return Promise.all(rows.map((row) => this.#toRecord(row)));
   }
 
   async updateActivity(
@@ -149,8 +136,8 @@ export class ActivityStore {
     const nextSummary = patch.summary ?? existing.summary;
     const nextCollapsed = patch.collapsed ?? existing.collapsed;
     const now = Date.now();
-    const encrypted = await this.#vault.encryptText(
-      JSON.stringify({ title: existing.title, summary: nextSummary }),
+    const encrypted = await this.#vault.encryptJson(
+      { title: existing.title, summary: nextSummary },
       `activities:${id}`,
     );
     this.#sql.exec(
@@ -236,17 +223,10 @@ export function createActivitiesExtension(
       const receipt = await childSession.submit(subagentPrompt, {
         operationId: `spawn-${activityId}`,
       });
-      return {
-        output: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              activity: record,
-              operationId: receipt.operationId,
-            }),
-          },
-        ],
-      };
+      return jsonToolResult({
+        activity: record,
+        operationId: receipt.operationId,
+      });
     },
   };
 
@@ -259,10 +239,7 @@ export function createActivitiesExtension(
     async execute({ activityId, instruction }) {
       const existing = await store.getActivity(activityId);
       if (!existing) {
-        return {
-          isError: true,
-          output: [{ type: "text", text: `Unknown activityId: ${activityId}` }],
-        };
+        return errorToolResult(`Unknown activityId: ${activityId}`);
       }
       const receipt = await harness
         .session(existing.sessionId)
@@ -274,18 +251,11 @@ export function createActivitiesExtension(
       if (updated) {
         onActivityChanged(updated);
       }
-      return {
-        output: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              activityId,
-              sessionId: existing.sessionId,
-              operationId: receipt.operationId,
-            }),
-          },
-        ],
-      };
+      return jsonToolResult({
+        activityId,
+        sessionId: existing.sessionId,
+        operationId: receipt.operationId,
+      });
     },
   };
 
@@ -302,15 +272,10 @@ export function createActivitiesExtension(
         collapsed: true,
       });
       if (!updated) {
-        return {
-          isError: true,
-          output: [{ type: "text", text: `Unknown activityId: ${activityId}` }],
-        };
+        return errorToolResult(`Unknown activityId: ${activityId}`);
       }
       onActivityChanged(updated);
-      return {
-        output: [{ type: "text", text: JSON.stringify(updated) }],
-      };
+      return jsonToolResult(updated);
     },
   };
 
@@ -325,11 +290,7 @@ export function createActivitiesExtension(
       const filtered = status
         ? all.filter((item) => item.status === status)
         : all;
-      return {
-        output: [
-          { type: "text", text: JSON.stringify({ activities: filtered }) },
-        ],
-      };
+      return jsonToolResult({ activities: filtered });
     },
   };
 

@@ -103,6 +103,75 @@ function buildWorkerMultipart(code: string): {
   return { boundary, body };
 }
 
+async function ensureWorkersSubdomain(
+  cleanAccount: string,
+  accountId: string,
+  authHeader: string,
+): Promise<
+  | { readonly ok: true; readonly subdomain: string }
+  | { readonly ok: false; readonly error: string }
+> {
+  const endpoint = `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/subdomain`;
+  const existingRes = await fetch(endpoint, {
+    headers: { Authorization: authHeader },
+  });
+  if (existingRes.ok) {
+    const parsed = SubdomainResponseSchema.safeParse(await existingRes.json());
+    if (!parsed.success) {
+      return { ok: false, error: "Unexpected Cloudflare subdomain shape." };
+    }
+    return { ok: true, subdomain: parsed.data.result.subdomain };
+  }
+  if (existingRes.status !== 404) {
+    return {
+      ok: false,
+      error: await readCloudflareError(
+        existingRes,
+        "Could not read workers.dev subdomain",
+      ),
+    };
+  }
+
+  const basePrefix = accountId
+    .replace(/[^a-z0-9]/gi, "")
+    .slice(0, 12)
+    .toLowerCase();
+  const candidates = [
+    `pi-${basePrefix || "agent"}`,
+    `pi-${basePrefix || "agent"}-${randomBoundarySuffix().slice(-6)}`,
+  ];
+  for (const candidate of candidates) {
+    const createRes = await fetch(endpoint, {
+      method: "PUT",
+      headers: {
+        Authorization: authHeader,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ subdomain: candidate }),
+    });
+    if (createRes.ok) {
+      const parsed = SubdomainResponseSchema.safeParse(await createRes.json());
+      return {
+        ok: true,
+        subdomain: parsed.success ? parsed.data.result.subdomain : candidate,
+      };
+    }
+    if (createRes.status !== 409) {
+      return {
+        ok: false,
+        error: await readCloudflareError(
+          createRes,
+          "Could not register workers.dev subdomain",
+        ),
+      };
+    }
+  }
+  return {
+    ok: false,
+    error: "Could not register an available workers.dev subdomain.",
+  };
+}
+
 export async function deployCloudflareWorker(
   cfApiToken: string,
   accountId: string,
@@ -136,6 +205,15 @@ export async function deployCloudflareWorker(
       };
     }
 
+    const ensuredSubdomain = await ensureWorkersSubdomain(
+      cleanAccount,
+      accountId,
+      authHeader,
+    );
+    if (!ensuredSubdomain.ok) {
+      return ensuredSubdomain;
+    }
+
     const enableRes = await fetch(
       `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/scripts/${DEFAULT_WORKER_NAME}/subdomain`,
       {
@@ -157,30 +235,12 @@ export async function deployCloudflareWorker(
       };
     }
 
-    const subRes = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/subdomain`,
-      { headers: { Authorization: authHeader } },
-    );
-    if (!subRes.ok) {
-      return {
-        ok: false,
-        error: await readCloudflareError(
-          subRes,
-          "Could not read workers.dev subdomain",
-        ),
-      };
-    }
-    const parsed = SubdomainResponseSchema.safeParse(await subRes.json());
-    if (!parsed.success) {
-      return { ok: false, error: "Unexpected Cloudflare subdomain shape." };
-    }
-
     return {
       ok: true,
       worker: {
         accountId,
         accountName,
-        baseUrl: `https://${DEFAULT_WORKER_NAME}.${parsed.data.result.subdomain}.workers.dev`,
+        baseUrl: `https://${DEFAULT_WORKER_NAME}.${ensuredSubdomain.subdomain}.workers.dev`,
       },
     };
   } catch (thrown) {

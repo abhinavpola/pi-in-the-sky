@@ -78,6 +78,31 @@ type ReactNativeWebSocketConstructor = new (
   options?: { readonly headers?: Record<string, string> },
 ) => WebSocket;
 
+export function validateBaseUrl(baseUrl: string): Result<string, string> {
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl.trim());
+  } catch {
+    return err("Invalid server URL.");
+  }
+  const isLoopback =
+    parsed.hostname === "127.0.0.1" ||
+    parsed.hostname === "localhost" ||
+    parsed.hostname === "::1" ||
+    parsed.hostname === "[::1]";
+  switch (parsed.protocol) {
+    case "https:":
+      return ok(parsed.toString().replace(/\/$/, ""));
+    case "http:":
+      if (isLoopback) {
+        return ok(parsed.toString().replace(/\/$/, ""));
+      }
+      return err("Remote connections must use https://.");
+    default:
+      return err("Server URL must use https:// (or http:// for localhost).");
+  }
+}
+
 function makeWsUrl(config: ConnectionConfig): string {
   const cleanBase = config.baseUrl.replace(/\/$/, "");
   const wsBase = cleanBase.replace(/^http/, "ws");
@@ -89,8 +114,12 @@ async function requestJson<T>(
   path: string,
   init?: RequestInit,
 ): Promise<Result<T, string>> {
+  const validated = validateBaseUrl(config.baseUrl);
+  if (!validated.ok) {
+    return validated;
+  }
   try {
-    const cleanBase = config.baseUrl.replace(/\/$/, "");
+    const cleanBase = validated.value;
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
@@ -134,6 +163,11 @@ export class AgentClient {
 
   connect(): void {
     this.disconnect();
+    const validated = validateBaseUrl(this.#config.baseUrl);
+    if (!validated.ok) {
+      this.#handlers.onError(validated.error);
+      return;
+    }
     this.#handlers.onConnectionChange("connecting");
     const WebSocketWithHeaders =
       WebSocket as unknown as ReactNativeWebSocketConstructor;

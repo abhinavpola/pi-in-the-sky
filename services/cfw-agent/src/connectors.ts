@@ -85,7 +85,20 @@ const CalendarListEventsSchema = obj({
   timeMin: str(),
   timeMax: str(),
   calendarId: opt(str()),
+  pageToken: opt(str()),
 });
+
+function encodeBase64UrlUtf8(input: string): string {
+  const bytes = new TextEncoder().encode(input);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+}
 
 export function createConnectorsExtension(
   store: ConnectorStore,
@@ -172,13 +185,14 @@ export function createConnectorsExtension(
       parameters: GmailCreateDraftSchema,
       replay: "unsafe",
       execute: ({ to, subject, body }) => {
-        const rawMime = [`To: ${to}`, `Subject: ${subject}`, "", body].join(
-          "\r\n",
-        );
-        const raw = btoa(rawMime)
-          .replaceAll("+", "-")
-          .replaceAll("/", "_")
-          .replaceAll("=", "");
+        const rawMime = [
+          `To: ${to}`,
+          `Subject: ${subject}`,
+          'Content-Type: text/plain; charset="UTF-8"',
+          "",
+          body,
+        ].join("\r\n");
+        const raw = encodeBase64UrlUtf8(rawMime);
         return requestApi("gmail", `${gmailBase()}/users/me/drafts`, {
           method: "POST",
           body: JSON.stringify({ message: { raw } }),
@@ -190,10 +204,11 @@ export function createConnectorsExtension(
     typeof CalendarListEventsSchema
   > = {
     name: "calendar_list_events",
-    description: "List Google Calendar events within an ISO-8601 time range.",
+    description:
+      "List Google Calendar events within an ISO-8601 time range. Pass pageToken from nextPageToken to fetch subsequent pages.",
     parameters: CalendarListEventsSchema,
     replay: "safe",
-    execute: ({ timeMin, timeMax, calendarId }) => {
+    execute: ({ timeMin, timeMax, calendarId, pageToken }) => {
       const id = encodeURIComponent(calendarId ?? "primary");
       const params = new URLSearchParams({
         timeMin,
@@ -201,6 +216,9 @@ export function createConnectorsExtension(
         singleEvents: "true",
         orderBy: "startTime",
       });
+      if (pageToken) {
+        params.set("pageToken", pageToken);
+      }
       return requestApi(
         "google_calendar",
         `${calendarBase()}/calendars/${id}/events?${params.toString()}`,

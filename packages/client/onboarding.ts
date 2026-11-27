@@ -344,53 +344,76 @@ export async function discoverCloudflareWorker(
     const accountsParsed = AccountsResponseSchema.safeParse(
       await accountsRes.json(),
     );
-    const accountId = accountsParsed.success
-      ? accountsParsed.data.result[0]?.id
-      : undefined;
-    if (!accountId) {
+    const accounts = accountsParsed.success ? accountsParsed.data.result : [];
+    if (accounts.length === 0) {
       return {
         kind: "error",
         message: "No Cloudflare account found for this token.",
       };
     }
-    const cleanAccount = encodeURIComponent(accountId);
-    const [scriptRes, subRes] = await Promise.all([
-      fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/scripts/${DEFAULT_WORKER_NAME}`,
-        { headers },
-      ),
-      fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/subdomain`,
-        { headers },
-      ),
-    ]);
-    if (scriptRes.status === 404) {
-      return { kind: "not_deployed", accountId };
-    }
-    if (!scriptRes.ok) {
+    const checks = await Promise.all(
+      accounts.map(async (account) => {
+        const cleanAccount = encodeURIComponent(account.id);
+        const scriptRes = await fetch(
+          `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/scripts/${DEFAULT_WORKER_NAME}`,
+          { headers },
+        );
+        if (scriptRes.status === 404) {
+          return { kind: "not_deployed" as const, accountId: account.id };
+        }
+        if (!scriptRes.ok) {
+          return {
+            kind: "error" as const,
+            message: `Cloudflare API returned HTTP ${scriptRes.status}`,
+          };
+        }
+        const subRes = await fetch(
+          `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/subdomain`,
+          { headers },
+        );
+        if (!subRes.ok) {
+          return {
+            kind: "error" as const,
+            message: `Could not read workers.dev subdomain (HTTP ${subRes.status})`,
+          };
+        }
+        const parsed = SubdomainResponseSchema.safeParse(await subRes.json());
+        if (!parsed.success) {
+          return {
+            kind: "error" as const,
+            message: "Unexpected Cloudflare subdomain shape.",
+          };
+        }
+        return {
+          kind: "found" as const,
+          accountId: account.id,
+          baseUrl: `https://${DEFAULT_WORKER_NAME}.${parsed.data.result.subdomain}.workers.dev`,
+        };
+      }),
+    );
+    const found = checks.filter((item) => item.kind === "found");
+    if (found.length > 1) {
       return {
         kind: "error",
-        message: `Cloudflare API returned HTTP ${scriptRes.status}`,
+        message:
+          "Multiple Cloudflare accounts have this Worker deployed. Use an account-scoped token.",
       };
     }
-    if (!subRes.ok) {
+    if (found[0]) {
+      return found[0];
+    }
+    const firstError = checks.find((item) => item.kind === "error");
+    if (firstError) {
+      return firstError;
+    }
+    const firstAccount = accounts[0];
+    if (!firstAccount) {
       return {
         kind: "error",
-        message: `Could not read workers.dev subdomain (HTTP ${subRes.status})`,
+        message: "No Cloudflare account found for this token.",
       };
     }
-    const parsed = SubdomainResponseSchema.safeParse(await subRes.json());
-    if (!parsed.success) {
-      return {
-        kind: "error",
-        message: "Unexpected Cloudflare subdomain shape.",
-      };
-    }
-    return {
-      kind: "found",
-      accountId,
-      baseUrl: `https://${DEFAULT_WORKER_NAME}.${parsed.data.result.subdomain}.workers.dev`,
-    };
+    return { kind: "not_deployed", accountId: firstAccount.id };
   } catch (thrown) {
     return {
       kind: "error",

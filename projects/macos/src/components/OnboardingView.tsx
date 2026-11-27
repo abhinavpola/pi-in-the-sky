@@ -37,14 +37,19 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
 
-  const verifyLiveWorker = async (candidateUrl: string) => {
+  const verifyLiveWorker = async (
+    candidateUrl: string,
+    fallbackToDeploy: boolean,
+  ) => {
     setStatusMessage("Connecting...");
     const status = await fetchWorkerStatus(candidateUrl);
     switch (status.kind) {
       case "offline":
         setStatusMessage(null);
         setErrorText(status.reason);
-        setStep("deploy");
+        if (fallbackToDeploy) {
+          setStep("deploy");
+        }
         return;
       case "live_no_oauth":
         setStatusMessage(null);
@@ -90,7 +95,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
         setCfApiToken("");
         setNearAiApiKey("");
         setWorkerUrl(discovery.baseUrl);
-        await verifyLiveWorker(discovery.baseUrl);
+        await verifyLiveWorker(discovery.baseUrl, true);
         return;
       }
       case "not_deployed":
@@ -189,6 +194,15 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
             >
               <Text style={styles.secondaryButtonText}>Continue</Text>
             </Pressable>
+            <Pressable
+              style={styles.localLink}
+              onPress={() => {
+                setErrorText(null);
+                setStep("connect");
+              }}
+            >
+              <Text style={styles.localText}>Back</Text>
+            </Pressable>
           </View>
         );
       case "access_login":
@@ -233,7 +247,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
         <Pressable
           style={styles.localLink}
           onPress={() => {
-            void verifyLiveWorker(LOCAL_DEV_URL);
+            void verifyLiveWorker(LOCAL_DEV_URL, false);
           }}
         >
           <Text style={styles.localText}>Use local server</Text>

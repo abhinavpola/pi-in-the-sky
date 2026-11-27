@@ -399,12 +399,12 @@ export async function discoverCloudflareWorker(
           "Multiple Cloudflare accounts have this Worker deployed. Use an account-scoped token.",
       };
     }
-    if (found[0]) {
-      return found[0];
-    }
     const firstError = checks.find((item) => item.kind === "error");
     if (firstError) {
       return firstError;
+    }
+    if (found[0]) {
+      return found[0];
     }
     const firstAccount = accounts[0];
     if (!firstAccount) {

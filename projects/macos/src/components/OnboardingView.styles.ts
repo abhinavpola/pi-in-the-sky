@@ -138,8 +138,10 @@ export const onboardingStyles = StyleSheet.create({
     fontWeight: "500",
   },
   input: {
-    backgroundColor: THEME.inputBg,
+    backgroundColor: THEME.white,
     color: THEME.textPrimary,
+    borderWidth: 1,
+    borderColor: THEME.borderStrong,
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,

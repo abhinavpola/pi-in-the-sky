@@ -402,9 +402,15 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
                 style={onboardingStyles.input}
                 value={nearAiApiKey}
                 onChangeText={setNearAiApiKey}
-                secureTextEntry
+                autoCapitalize="none"
+                autoCorrect={false}
+                returnKeyType="done"
+                submitBehavior="blurAndSubmit"
+                onSubmitEditing={() => {
+                  void handleConfigureProvider();
+                }}
                 placeholder="sk-..."
-                placeholderTextColor={THEME.textTertiary}
+                placeholderTextColor={THEME.textSecondary}
               />
             </View>
             {nearAiApiKey.trim().length > 0 ? (

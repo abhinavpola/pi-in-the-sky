@@ -30,6 +30,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     reactNativeFactory = factory
     super.init()
   }
+
+  func applicationWillFinishLaunching(_ notification: Notification) {
+    NSApp.appearance = NSAppearance(named: .aqua)
+  }
 }
 
 // MARK: - React Native Delegate

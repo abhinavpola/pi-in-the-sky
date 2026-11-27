@@ -58,6 +58,7 @@ const ConnectorBodySchema = z.object({
 const NoteBodySchema = z.object({
   content: z.string().min(1),
   category: z.string().optional(),
+  date: z.string().optional(),
 });
 
 const ResumeTakeoverBodySchema = z.object({
@@ -236,8 +237,12 @@ export class PersonalAgent extends DurableObject<Env> {
     return this.memory.searchNotes(query, limit);
   }
 
-  writeMemoryNote(content: string, category = "general"): MemoryNote {
-    return this.memory.addNote(content, category);
+  writeMemoryNote(
+    content: string,
+    category = "general",
+    date?: string,
+  ): MemoryNote {
+    return this.memory.addNote(content, category, date);
   }
 
   setConnectorToken(
@@ -349,7 +354,11 @@ export class PersonalAgent extends DurableObject<Env> {
         return Response.json({ error: "content is required" }, { status: 400 });
       }
       return Response.json(
-        this.writeMemoryNote(parsed.data.content, parsed.data.category),
+        this.writeMemoryNote(
+          parsed.data.content,
+          parsed.data.category,
+          parsed.data.date,
+        ),
         { status: 201 },
       );
     }

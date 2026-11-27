@@ -8,6 +8,7 @@
   ],
   "type": "module",
   "scripts": {
+    "bundle:worker": "bun scripts/bundle-worker.ts",
     "fallow": "fallow dead-code --production --type-aware --fail-on-issues && fallow dead-code --test-only-exports --type-aware --fail-on-issues && fallow dupes --fail-on-issues",
     "deploy": "bun run --cwd services/cfw-agent deploy",
     "macos": "bun run --cwd projects/macos macos:release",

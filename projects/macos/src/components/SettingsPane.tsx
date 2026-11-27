@@ -3,11 +3,18 @@ import type {
   ConnectionState,
 } from "@pi-in-the-sky/client/agent-client";
 import {
+  type CloudflareDeviceAuth,
+  pollCloudflareDeviceToken,
+  startCloudflareDeviceAuth,
+} from "@pi-in-the-sky/client/cloudflare-device-auth";
+import { destroyCloudflareWorker } from "@pi-in-the-sky/client/cloudflare-worker-api";
+import {
+  discoverCloudflareWorker,
   fetchWorkerStatus,
   refreshAccessToken,
 } from "@pi-in-the-sky/client/onboarding";
-import { useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { signInWithCloudflareAccess } from "../native";
 import { THEME } from "../theme";
@@ -18,6 +25,7 @@ type SettingsPaneProps = {
   readonly getSessionEpoch: () => number;
   readonly onSave: (config: ConnectionConfig, expectedEpoch?: number) => void;
   readonly onSignOut: () => void;
+  readonly onOffboard: () => void;
 };
 
 export function SettingsPane({
@@ -26,9 +34,30 @@ export function SettingsPane({
   getSessionEpoch,
   onSave,
   onSignOut,
+  onOffboard,
 }: SettingsPaneProps) {
   const [errorText, setErrorText] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [destroyAuth, setDestroyAuth] = useState<CloudflareDeviceAuth | null>(
+    null,
+  );
+  const destroyAbortRef = useRef<AbortController | null>(null);
+  const destroyEpochRef = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      destroyEpochRef.current += 1;
+      destroyAbortRef.current?.abort();
+    };
+  }, []);
+
+  const cancelDestroy = () => {
+    destroyEpochRef.current += 1;
+    destroyAbortRef.current?.abort();
+    destroyAbortRef.current = null;
+    setDestroyAuth(null);
+    setStatusMessage(null);
+  };
 
   const handleSignIn = async () => {
     const epoch = getSessionEpoch();
@@ -98,7 +127,93 @@ export function SettingsPane({
     );
   };
 
+  const handleDestroyWorker = async () => {
+    if (statusMessage !== null) {
+      return;
+    }
+    destroyEpochRef.current += 1;
+    const epoch = destroyEpochRef.current;
+    setErrorText(null);
+    setStatusMessage("Starting Cloudflare approval...");
+    const started = await startCloudflareDeviceAuth();
+    if (destroyEpochRef.current !== epoch) {
+      return;
+    }
+    if (!started.ok) {
+      setStatusMessage(null);
+      setErrorText(started.error);
+      return;
+    }
+    destroyAbortRef.current?.abort();
+    const controller = new AbortController();
+    destroyAbortRef.current = controller;
+    setDestroyAuth(started.value);
+    setStatusMessage("Approve in Cloudflare to destroy Worker...");
+    await Linking.openURL(started.value.verificationUriComplete);
+
+    const polled = await pollCloudflareDeviceToken(
+      started.value,
+      controller.signal,
+    );
+    if (controller.signal.aborted || destroyEpochRef.current !== epoch) {
+      return;
+    }
+    setDestroyAuth(null);
+    if (!polled.ok) {
+      setStatusMessage(null);
+      setErrorText(polled.error);
+      return;
+    }
+    setStatusMessage("Locating Worker...");
+    const discovery = await discoverCloudflareWorker(polled.accessToken);
+    if (destroyEpochRef.current !== epoch) {
+      return;
+    }
+    switch (discovery.kind) {
+      case "error":
+        setStatusMessage(null);
+        setErrorText(discovery.message);
+        return;
+      case "not_deployed":
+        setStatusMessage(null);
+        onOffboard();
+        return;
+      case "found": {
+        const normalizedBaseUrl = config.baseUrl.trim().replace(/\/$/, "");
+        const target = discovery.matches.find(
+          (item) =>
+            item.baseUrl.trim().replace(/\/$/, "") === normalizedBaseUrl,
+        );
+        if (!target) {
+          setStatusMessage(null);
+          setErrorText("No deployed Worker matched this server URL.");
+          return;
+        }
+        setStatusMessage(`Destroying Worker in ${target.accountName}...`);
+        const destroyed = await destroyCloudflareWorker(
+          polled.accessToken,
+          target.accountId,
+        );
+        if (destroyEpochRef.current !== epoch) {
+          return;
+        }
+        if (!destroyed.ok) {
+          setStatusMessage(null);
+          setErrorText(destroyed.error);
+          return;
+        }
+        setStatusMessage(null);
+        onOffboard();
+        return;
+      }
+      default: {
+        discovery satisfies never;
+      }
+    }
+  };
+
   const isSignedIn = config.authToken.trim().length > 0;
+  const isBusy = statusMessage !== null;
 
   return (
     <View style={styles.container}>
@@ -127,6 +242,7 @@ export function SettingsPane({
               {config.refreshToken ? (
                 <Pressable
                   style={styles.secondaryButton}
+                  disabled={isBusy}
                   onPress={() => {
                     void handleRefreshSession();
                   }}
@@ -134,13 +250,27 @@ export function SettingsPane({
                   <Text style={styles.secondaryButtonText}>Refresh</Text>
                 </Pressable>
               ) : null}
-              <Pressable style={styles.destructiveButton} onPress={onSignOut}>
-                <Text style={styles.destructiveButtonText}>Sign Out</Text>
+              <Pressable
+                style={styles.secondaryButton}
+                disabled={isBusy}
+                onPress={onSignOut}
+              >
+                <Text style={styles.secondaryButtonText}>Sign Out</Text>
+              </Pressable>
+              <Pressable
+                style={styles.destructiveButton}
+                disabled={isBusy}
+                onPress={() => {
+                  void handleDestroyWorker();
+                }}
+              >
+                <Text style={styles.destructiveButtonText}>Destroy Worker</Text>
               </Pressable>
             </>
           ) : (
             <Pressable
               style={styles.primaryButton}
+              disabled={isBusy}
               onPress={() => {
                 void handleSignIn();
               }}
@@ -149,6 +279,26 @@ export function SettingsPane({
             </Pressable>
           )}
         </View>
+
+        {destroyAuth ? (
+          <View style={styles.verifyCard}>
+            <Text style={styles.verifyTitle}>Approve in Cloudflare</Text>
+            <Text style={styles.verifyCode}>{destroyAuth.userCode}</Text>
+            <View style={styles.actions}>
+              <Pressable
+                style={styles.secondaryButton}
+                onPress={() => {
+                  void Linking.openURL(destroyAuth.verificationUriComplete);
+                }}
+              >
+                <Text style={styles.secondaryButtonText}>Open Cloudflare</Text>
+              </Pressable>
+              <Pressable style={styles.secondaryButton} onPress={cancelDestroy}>
+                <Text style={styles.secondaryButtonText}>Cancel</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
 
         {errorText ? (
           <Text style={styles.error}>{errorText}</Text>
@@ -224,6 +374,21 @@ const styles = StyleSheet.create({
     color: THEME.red,
     fontSize: 13,
     fontWeight: "600",
+  },
+  verifyCard: {
+    backgroundColor: THEME.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    padding: 16,
+    gap: 10,
+  },
+  verifyTitle: { color: THEME.textPrimary, fontSize: 14, fontWeight: "600" },
+  verifyCode: {
+    color: THEME.textPrimary,
+    fontSize: 20,
+    fontWeight: "600",
+    letterSpacing: 3,
   },
   status: { color: THEME.textSecondary, fontSize: 12 },
   error: { color: THEME.red, fontSize: 12 },

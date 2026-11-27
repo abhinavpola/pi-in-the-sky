@@ -7,7 +7,8 @@
     "./protocol": "./protocol.ts",
     "./agent-client": "./agent-client.ts",
     "./onboarding": "./onboarding.ts",
-    "./cloudflare-device-auth": "./cloudflare-device-auth.ts"
+    "./cloudflare-device-auth": "./cloudflare-device-auth.ts",
+    "./cloudflare-worker-api": "./cloudflare-worker-api.ts"
   },
   "dependencies": {
     "@pi-in-the-sky/result-monad": "workspace:*",

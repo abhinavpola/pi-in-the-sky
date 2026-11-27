@@ -24,6 +24,7 @@ jobs:
         with:
           bun-version: canary
       - run: bun install --frozen-lockfile
+      - run: bun run bundle:worker
       - run: bun check -b
       - run: bun lint
       - run: bun fmt --check

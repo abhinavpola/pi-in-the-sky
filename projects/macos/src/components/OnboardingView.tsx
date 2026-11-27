@@ -1,16 +1,22 @@
 import type { ConnectionConfig } from "@pi-in-the-sky/client/agent-client";
 import {
+  type CloudflareDeviceAuth,
+  pollCloudflareDeviceToken,
+  startCloudflareDeviceAuth,
+} from "@pi-in-the-sky/client/cloudflare-device-auth";
+import {
   DEPLOY_TO_CLOUDFLARE_URL,
   discoverCloudflareWorker,
+  type DiscoveredWorker,
   fetchWorkerStatus,
   provisionWorkerSecrets,
 } from "@pi-in-the-sky/client/onboarding";
 import { LOCAL_DEV_AUTH_TOKEN } from "@pi-in-the-sky/client/protocol";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Linking,
   Pressable,
-  StyleSheet,
+  ScrollView,
   Text,
   TextInput,
   View,
@@ -18,8 +24,10 @@ import {
 
 import { signInWithCloudflareAccess } from "../native";
 import { THEME } from "../theme";
+import { onboardingStyles } from "./OnboardingView.styles";
 
-type OnboardingStep = "connect" | "deploy" | "access_login";
+type OnboardingStep =
+  "connect" | "cf_verify" | "select_account" | "deploy" | "access_login";
 
 type OnboardingViewProps = {
   readonly onComplete: (config: ConnectionConfig) => void;
@@ -27,17 +35,37 @@ type OnboardingViewProps = {
 
 export function OnboardingView({ onComplete }: OnboardingViewProps) {
   const [step, setStep] = useState<OnboardingStep>("connect");
-  const [cfApiToken, setCfApiToken] = useState("");
   const [nearAiApiKey, setNearAiApiKey] = useState("");
+  const [cfAccessToken, setCfAccessToken] = useState("");
+  const [deviceAuth, setDeviceAuth] = useState<CloudflareDeviceAuth | null>(
+    null,
+  );
+  const [matchedWorkers, setMatchedWorkers] = useState<
+    readonly DiscoveredWorker[]
+  >([]);
   const [workerUrl, setWorkerUrl] = useState("");
   const [teamDomain, setTeamDomain] = useState("");
   const [clientId, setClientId] = useState("");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
+  const pollAbortRef = useRef<AbortController | null>(null);
+  const flowEpochRef = useRef(0);
+  const configuringRef = useRef(false);
 
-  const verifyLiveWorker = async (candidateUrl: string) => {
+  useEffect(() => {
+    return () => {
+      flowEpochRef.current += 1;
+      configuringRef.current = false;
+      pollAbortRef.current?.abort();
+    };
+  }, []);
+
+  const verifyLiveWorker = async (candidateUrl: string, epoch: number) => {
     setStatusMessage("Connecting...");
     const status = await fetchWorkerStatus(candidateUrl);
+    if (flowEpochRef.current !== epoch) {
+      return;
+    }
     switch (status.kind) {
       case "offline":
         setStatusMessage(null);
@@ -45,6 +73,9 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
         setStep("deploy");
         return;
       case "live_no_oauth":
+        setCfAccessToken("");
+        setNearAiApiKey("");
+        setMatchedWorkers([]);
         setStatusMessage(null);
         onComplete({
           baseUrl: status.baseUrl,
@@ -52,6 +83,9 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
         });
         return;
       case "live_oauth_ready":
+        setCfAccessToken("");
+        setNearAiApiKey("");
+        setMatchedWorkers([]);
         setWorkerUrl(status.baseUrl);
         setTeamDomain(status.teamDomain);
         setClientId(status.clientId);
@@ -64,31 +98,63 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
     }
   };
 
-  const handleContinue = async () => {
-    if (!cfApiToken.trim() || !nearAiApiKey.trim()) {
-      setErrorText("Enter both keys to continue.");
+  const configureWorker = async (
+    token: string,
+    target: DiscoveredWorker,
+    epoch: number,
+  ) => {
+    if (flowEpochRef.current !== epoch || configuringRef.current) {
+      return;
+    }
+    configuringRef.current = true;
+    try {
+      setErrorText(null);
+      setStatusMessage("Configuring...");
+      const provisioned = await provisionWorkerSecrets(
+        token,
+        target.accountId,
+        nearAiApiKey,
+      );
+      if (flowEpochRef.current !== epoch) {
+        return;
+      }
+      if (!provisioned.ok) {
+        setStatusMessage(null);
+        setErrorText(provisioned.error);
+        setStep("connect");
+        return;
+      }
+      setWorkerUrl(target.baseUrl);
+      await verifyLiveWorker(target.baseUrl, epoch);
+    } finally {
+      configuringRef.current = false;
+    }
+  };
+
+  const discoverAndConfigure = async (token: string, epoch: number) => {
+    if (flowEpochRef.current !== epoch) {
       return;
     }
     setErrorText(null);
     setStatusMessage("Checking Cloudflare...");
-    const discovery = await discoverCloudflareWorker(cfApiToken);
+    const discovery = await discoverCloudflareWorker(token);
+    if (flowEpochRef.current !== epoch) {
+      return;
+    }
     switch (discovery.kind) {
       case "found": {
-        setStatusMessage("Configuring...");
-        const provisioned = await provisionWorkerSecrets(
-          cfApiToken,
-          discovery.accountId,
-          nearAiApiKey,
-        );
-        if (!provisioned.ok) {
-          setStatusMessage(null);
-          setErrorText(provisioned.error);
+        const single = discovery.matches[0];
+        if (
+          discovery.accountCount === 1 &&
+          discovery.matches.length === 1 &&
+          single
+        ) {
+          await configureWorker(token, single, epoch);
           return;
         }
-        setCfApiToken("");
-        setNearAiApiKey("");
-        setWorkerUrl(discovery.baseUrl);
-        await verifyLiveWorker(discovery.baseUrl);
+        setMatchedWorkers(discovery.matches);
+        setStatusMessage(null);
+        setStep("select_account");
         return;
       }
       case "not_deployed":
@@ -98,11 +164,67 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
       case "error":
         setStatusMessage(null);
         setErrorText(discovery.message);
+        setStep("connect");
         return;
       default: {
         discovery satisfies never;
       }
     }
+  };
+
+  const handleSignInWithCloudflare = async () => {
+    if (!nearAiApiKey.trim()) {
+      setErrorText("Enter your NEAR AI key to continue.");
+      return;
+    }
+    flowEpochRef.current += 1;
+    const epoch = flowEpochRef.current;
+    setErrorText(null);
+    setStatusMessage("Starting Cloudflare sign-in...");
+    const started = await startCloudflareDeviceAuth();
+    if (flowEpochRef.current !== epoch) {
+      return;
+    }
+    if (!started.ok) {
+      setStatusMessage(null);
+      setErrorText(started.error);
+      return;
+    }
+    pollAbortRef.current?.abort();
+    const controller = new AbortController();
+    pollAbortRef.current = controller;
+    setDeviceAuth(started.value);
+    setStatusMessage("Waiting for approval...");
+    setStep("cf_verify");
+    await Linking.openURL(started.value.verificationUriComplete);
+
+    const polled = await pollCloudflareDeviceToken(
+      started.value,
+      controller.signal,
+    );
+    if (controller.signal.aborted || flowEpochRef.current !== epoch) {
+      return;
+    }
+    if (!polled.ok) {
+      setStatusMessage(null);
+      setErrorText(polled.error);
+      setStep("connect");
+      return;
+    }
+    setCfAccessToken(polled.accessToken);
+    await discoverAndConfigure(polled.accessToken, epoch);
+  };
+
+  const handleCancelFlow = () => {
+    flowEpochRef.current += 1;
+    configuringRef.current = false;
+    pollAbortRef.current?.abort();
+    pollAbortRef.current = null;
+    setDeviceAuth(null);
+    setMatchedWorkers([]);
+    setStatusMessage(null);
+    setErrorText(null);
+    setStep("connect");
   };
 
   const handleOpenDeploy = async () => {
@@ -131,22 +253,11 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
     switch (current) {
       case "connect":
         return (
-          <View style={styles.card}>
-            <View style={styles.field}>
-              <Text style={styles.label}>Cloudflare Token</Text>
+          <View style={onboardingStyles.card}>
+            <View style={onboardingStyles.field}>
+              <Text style={onboardingStyles.label}>NEAR AI Key</Text>
               <TextInput
-                style={styles.input}
-                value={cfApiToken}
-                onChangeText={setCfApiToken}
-                secureTextEntry
-                placeholder="Paste token"
-                placeholderTextColor={THEME.textTertiary}
-              />
-            </View>
-            <View style={styles.field}>
-              <Text style={styles.label}>NEAR AI Key</Text>
-              <TextInput
-                style={styles.input}
+                style={onboardingStyles.input}
                 value={nearAiApiKey}
                 onChangeText={setNearAiApiKey}
                 secureTextEntry
@@ -155,61 +266,136 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
               />
             </View>
             <Pressable
-              style={styles.primaryButton}
+              style={onboardingStyles.primaryButton}
               onPress={() => {
-                void handleContinue();
+                void handleSignInWithCloudflare();
               }}
             >
-              <Text style={styles.primaryButtonText}>Continue</Text>
+              <Text style={onboardingStyles.primaryButtonText}>
+                Sign in with Cloudflare
+              </Text>
+            </Pressable>
+          </View>
+        );
+      case "cf_verify":
+        return (
+          <View style={onboardingStyles.card}>
+            <Text style={onboardingStyles.cardTitle}>Approve in Browser</Text>
+            <Text style={onboardingStyles.cardBody}>
+              Confirm this code in Cloudflare to continue.
+            </Text>
+            {deviceAuth ? (
+              <View style={onboardingStyles.codeBox}>
+                <Text style={onboardingStyles.codeText}>
+                  {deviceAuth.userCode}
+                </Text>
+              </View>
+            ) : null}
+            {deviceAuth ? (
+              <Pressable
+                style={onboardingStyles.secondaryButton}
+                onPress={() => {
+                  void Linking.openURL(deviceAuth.verificationUriComplete);
+                }}
+              >
+                <Text style={onboardingStyles.secondaryButtonText}>
+                  Open Cloudflare
+                </Text>
+              </Pressable>
+            ) : null}
+            <Pressable
+              style={onboardingStyles.localLink}
+              onPress={handleCancelFlow}
+            >
+              <Text style={onboardingStyles.localText}>Cancel</Text>
+            </Pressable>
+          </View>
+        );
+      case "select_account":
+        return (
+          <View style={onboardingStyles.card}>
+            <Text style={onboardingStyles.cardTitle}>Choose Account</Text>
+            <Text style={onboardingStyles.cardBody}>
+              Confirm which Cloudflare account should receive your NEAR AI key.
+            </Text>
+            <ScrollView
+              style={onboardingStyles.accountList}
+              contentContainerStyle={onboardingStyles.accountListContent}
+            >
+              {matchedWorkers.map((match) => (
+                <Pressable
+                  key={match.accountId}
+                  style={onboardingStyles.accountOption}
+                  disabled={statusMessage !== null}
+                  onPress={() => {
+                    const epoch = flowEpochRef.current;
+                    void configureWorker(cfAccessToken, match, epoch);
+                  }}
+                >
+                  <Text style={onboardingStyles.accountName}>
+                    {match.accountName}
+                  </Text>
+                  <Text style={onboardingStyles.accountUrl}>
+                    {match.baseUrl}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            <Pressable
+              style={onboardingStyles.localLink}
+              onPress={handleCancelFlow}
+            >
+              <Text style={onboardingStyles.localText}>Cancel</Text>
             </Pressable>
           </View>
         );
       case "deploy":
         return (
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Deploy to Cloudflare</Text>
-            <Text style={styles.cardBody}>
+          <View style={onboardingStyles.card}>
+            <Text style={onboardingStyles.cardTitle}>Deploy to Cloudflare</Text>
+            <Text style={onboardingStyles.cardBody}>
               Finish deploying in your browser, then continue.
             </Text>
             <Pressable
-              style={styles.primaryButton}
+              style={onboardingStyles.primaryButton}
               onPress={() => {
                 void handleOpenDeploy();
               }}
             >
-              <Text style={styles.primaryButtonText}>Deploy to Cloudflare</Text>
+              <Text style={onboardingStyles.primaryButtonText}>
+                Deploy to Cloudflare
+              </Text>
             </Pressable>
             <Pressable
-              style={styles.secondaryButton}
+              style={onboardingStyles.secondaryButton}
               onPress={() => {
-                void handleContinue();
+                flowEpochRef.current += 1;
+                const epoch = flowEpochRef.current;
+                void discoverAndConfigure(cfAccessToken, epoch);
               }}
             >
-              <Text style={styles.secondaryButtonText}>Continue</Text>
+              <Text style={onboardingStyles.secondaryButtonText}>Continue</Text>
             </Pressable>
             <Pressable
-              style={styles.localLink}
-              onPress={() => {
-                setErrorText(null);
-                setStep("connect");
-              }}
+              style={onboardingStyles.localLink}
+              onPress={handleCancelFlow}
             >
-              <Text style={styles.localText}>Back</Text>
+              <Text style={onboardingStyles.localText}>Back</Text>
             </Pressable>
           </View>
         );
       case "access_login":
         return (
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Sign In</Text>
-            <Text style={styles.cardBody}>{teamDomain}</Text>
+          <View style={onboardingStyles.card}>
+            <Text style={onboardingStyles.cardTitle}>Sign In</Text>
+            <Text style={onboardingStyles.cardBody}>{teamDomain}</Text>
             <Pressable
-              style={styles.primaryButton}
+              style={onboardingStyles.primaryButton}
               onPress={() => {
                 void handleAccessLogin();
               }}
             >
-              <Text style={styles.primaryButtonText}>
+              <Text style={onboardingStyles.primaryButtonText}>
                 Sign in with Cloudflare
               </Text>
             </Pressable>
@@ -223,126 +409,24 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
   };
 
   return (
-    <View style={styles.container}>
-      <View style={styles.frame}>
-        <View style={styles.header}>
-          <Text style={styles.title}>Pi in the Sky</Text>
-          <Text style={styles.subtitle}>Set up your personal assistant</Text>
+    <View style={onboardingStyles.container}>
+      <View style={onboardingStyles.frame}>
+        <View style={onboardingStyles.header}>
+          <Text style={onboardingStyles.title}>Pi in the Sky</Text>
+          <Text style={onboardingStyles.subtitle}>
+            Set up your personal assistant
+          </Text>
         </View>
 
         {renderStep(step)}
 
         {statusMessage ? (
-          <Text style={styles.status}>{statusMessage}</Text>
+          <Text style={onboardingStyles.status}>{statusMessage}</Text>
         ) : null}
-        {errorText ? <Text style={styles.error}>{errorText}</Text> : null}
+        {errorText ? (
+          <Text style={onboardingStyles.error}>{errorText}</Text>
+        ) : null}
       </View>
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: THEME.canvas,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 32,
-  },
-  frame: {
-    width: "100%",
-    maxWidth: 380,
-    gap: 16,
-  },
-  header: {
-    alignItems: "center",
-    gap: 4,
-    marginBottom: 4,
-  },
-  title: {
-    color: THEME.textPrimary,
-    fontSize: 26,
-    fontWeight: "600",
-    letterSpacing: -0.5,
-  },
-  subtitle: {
-    color: THEME.textSecondary,
-    fontSize: 13,
-  },
-  card: {
-    backgroundColor: THEME.surface,
-    borderRadius: 14,
-    padding: 20,
-    gap: 14,
-    borderWidth: 1,
-    borderColor: THEME.border,
-  },
-  cardTitle: {
-    color: THEME.textPrimary,
-    fontSize: 16,
-    fontWeight: "600",
-    letterSpacing: -0.2,
-  },
-  cardBody: {
-    color: THEME.textSecondary,
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  field: {
-    gap: 6,
-  },
-  label: {
-    color: THEME.textSecondary,
-    fontSize: 12,
-    fontWeight: "500",
-  },
-  input: {
-    backgroundColor: THEME.inputBg,
-    color: THEME.textPrimary,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    fontSize: 13,
-  },
-  primaryButton: {
-    backgroundColor: THEME.blue,
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignItems: "center",
-    marginTop: 4,
-  },
-  primaryButtonText: {
-    color: THEME.white,
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  secondaryButton: {
-    backgroundColor: THEME.inputBg,
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignItems: "center",
-  },
-  secondaryButtonText: {
-    color: THEME.textPrimary,
-    fontSize: 13,
-    fontWeight: "500",
-  },
-  status: {
-    color: THEME.textSecondary,
-    fontSize: 12,
-    textAlign: "center",
-  },
-  error: {
-    color: THEME.red,
-    fontSize: 12,
-    textAlign: "center",
-  },
-  localLink: {
-    alignSelf: "center",
-    marginTop: 4,
-  },
-  localText: {
-    color: THEME.textTertiary,
-    fontSize: 12,
-  },
-});

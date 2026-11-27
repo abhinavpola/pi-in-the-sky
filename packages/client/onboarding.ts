@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+import {
+  encodeFormBody,
+  listCloudflareAccounts,
+} from "./cloudflare-device-auth";
 import { randomBase64Url, sha256Base64Url } from "./pkce";
 import { AuthConfigResponseSchema } from "./protocol";
 
@@ -9,14 +13,6 @@ const DEFAULT_WORKER_NAME = "pi-in-the-sky-agent";
 
 export const DEPLOY_TO_CLOUDFLARE_URL = `https://deploy.workers.cloudflare.com/?url=${encodeURIComponent(WORKER_REPO_URL)}`;
 const ACCESS_REDIRECT_URI = "piinthesky://auth/callback";
-
-const AccountsResponseSchema = z.object({
-  result: z.array(
-    z.object({
-      id: z.string().min(1),
-    }),
-  ),
-});
 
 const SubdomainResponseSchema = z.object({
   result: z.object({
@@ -39,11 +35,17 @@ type WorkerStatus =
       readonly clientId: string;
     };
 
+export type DiscoveredWorker = {
+  readonly accountId: string;
+  readonly accountName: string;
+  readonly baseUrl: string;
+};
+
 type WorkerDiscoveryResult =
   | {
       readonly kind: "found";
-      readonly accountId: string;
-      readonly baseUrl: string;
+      readonly matches: readonly DiscoveredWorker[];
+      readonly accountCount: number;
     }
   | { readonly kind: "not_deployed"; readonly accountId: string }
   | { readonly kind: "error"; readonly message: string };
@@ -68,15 +70,6 @@ type OAuthCallbackResult =
 function normalizeTeamOrigin(teamDomain: string): string {
   const trimmed = teamDomain.trim().replace(/\/$/, "");
   return trimmed.startsWith("https://") ? trimmed : `https://${trimmed}`;
-}
-
-function encodeFormBody(entries: Record<string, string>): string {
-  return Object.entries(entries)
-    .map(
-      ([key, value]) =>
-        `${encodeURIComponent(key)}=${encodeURIComponent(value)}`,
-    )
-    .join("&");
 }
 
 function parseQueryParams(url: string): Map<string, string> {
@@ -331,26 +324,11 @@ export async function discoverCloudflareWorker(
 ): Promise<WorkerDiscoveryResult> {
   const headers = { Authorization: `Bearer ${cfApiToken.trim()}` };
   try {
-    const accountsRes = await fetch(
-      "https://api.cloudflare.com/client/v4/accounts",
-      { headers },
-    );
-    if (!accountsRes.ok) {
-      return {
-        kind: "error",
-        message: `Could not read Cloudflare accounts (HTTP ${accountsRes.status})`,
-      };
+    const listed = await listCloudflareAccounts(headers);
+    if (!listed.ok) {
+      return { kind: "error", message: listed.message };
     }
-    const accountsParsed = AccountsResponseSchema.safeParse(
-      await accountsRes.json(),
-    );
-    const accounts = accountsParsed.success ? accountsParsed.data.result : [];
-    if (accounts.length === 0) {
-      return {
-        kind: "error",
-        message: "No Cloudflare account found for this token.",
-      };
-    }
+    const accounts = listed.accounts;
     const checks = await Promise.all(
       accounts.map(async (account) => {
         const cleanAccount = encodeURIComponent(account.id);
@@ -360,6 +338,9 @@ export async function discoverCloudflareWorker(
         );
         if (scriptRes.status === 404) {
           return { kind: "not_deployed" as const, accountId: account.id };
+        }
+        if (scriptRes.status === 403) {
+          return { kind: "forbidden" as const };
         }
         if (!scriptRes.ok) {
           return {
@@ -371,6 +352,9 @@ export async function discoverCloudflareWorker(
           `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/subdomain`,
           { headers },
         );
+        if (subRes.status === 403) {
+          return { kind: "forbidden" as const };
+        }
         if (!subRes.ok) {
           return {
             kind: "error" as const,
@@ -387,33 +371,36 @@ export async function discoverCloudflareWorker(
         return {
           kind: "found" as const,
           accountId: account.id,
+          accountName: account.name,
           baseUrl: `https://${DEFAULT_WORKER_NAME}.${parsed.data.result.subdomain}.workers.dev`,
         };
       }),
     );
-    const found = checks.filter((item) => item.kind === "found");
-    if (found.length > 1) {
-      return {
-        kind: "error",
-        message:
-          "Multiple Cloudflare accounts have this Worker deployed. Use an account-scoped token.",
-      };
+    const matches: DiscoveredWorker[] = [];
+    for (const item of checks) {
+      if (item.kind === "found") {
+        matches.push({
+          accountId: item.accountId,
+          accountName: item.accountName,
+          baseUrl: item.baseUrl,
+        });
+      }
+    }
+    if (matches.length > 0) {
+      return { kind: "found", matches, accountCount: accounts.length };
     }
     const firstError = checks.find((item) => item.kind === "error");
     if (firstError) {
       return firstError;
     }
-    if (found[0]) {
-      return found[0];
+    const deployable = checks.find((item) => item.kind === "not_deployed");
+    if (deployable) {
+      return { kind: "not_deployed", accountId: deployable.accountId };
     }
-    const firstAccount = accounts[0];
-    if (!firstAccount) {
-      return {
-        kind: "error",
-        message: "No Cloudflare account found for this token.",
-      };
-    }
-    return { kind: "not_deployed", accountId: firstAccount.id };
+    return {
+      kind: "error",
+      message: "No accessible Cloudflare account found for Workers.",
+    };
   } catch (thrown) {
     return {
       kind: "error",

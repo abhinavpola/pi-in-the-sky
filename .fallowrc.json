@@ -1,0 +1,7 @@
+{
+  "entry": ["lint/*.js", "projects/macos/metro.config.js"],
+  "ignoreDependencies": ["@babel/runtime", "react-native-macos"],
+  "rules": {
+    "private-type-leak": "off"
+  }
+}

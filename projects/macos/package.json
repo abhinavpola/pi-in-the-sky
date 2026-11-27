@@ -1,0 +1,26 @@
+{
+  "name": "@pi-in-the-sky/macos",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "macos": "react-native run-macos",
+    "start": "react-native start"
+  },
+  "dependencies": {
+    "@babel/runtime": "^7.26.0",
+    "@pi-in-the-sky/client": "workspace:*",
+    "@pi-in-the-sky/result-monad": "workspace:*",
+    "react": "19.2.4",
+    "react-native": "0.83.10",
+    "react-native-macos": "0.83.0"
+  },
+  "devDependencies": {
+    "@babel/plugin-transform-export-namespace-from": "^8.1.3",
+    "@react-native-community/cli": "20.2.0",
+    "@react-native-community/cli-platform-ios": "20.2.0",
+    "@react-native/babel-preset": "0.83.10",
+    "@react-native/metro-config": "0.83.10",
+    "@types/react": "^19.2.14"
+  }
+}

@@ -1,0 +1,9 @@
+# CocoaPods
+Pods/
+
+# Xcode build & user state
+build/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+.xcode.env.local

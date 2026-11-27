@@ -1,0 +1,33 @@
+import path from "node:path";
+
+import { cloudflareTest } from "@cloudflare/vitest-plugin";
+import { defineConfig } from "vitest/config";
+
+const testsDir = import.meta.dirname;
+
+export default defineConfig({
+  plugins: [
+    cloudflareTest({
+      wrangler: { configPath: path.join(testsDir, "wrangler.jsonc") },
+    }),
+  ],
+  resolve: {
+    dedupe: [
+      "@earendil-works/chord",
+      "@earendil-works/pi-ai",
+      "@earendil-works/pi-durable",
+      "@earendil-works/pi-telemetry",
+    ],
+  },
+  ssr: {
+    optimizeDeps: {
+      include: ["@nearai/inference-sdk", "@phala/dcap-qvl"],
+    },
+  },
+  test: {
+    name: "cfw-agent-integration",
+    include: [path.join(testsDir, "**/*.test.ts")],
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
+  },
+});

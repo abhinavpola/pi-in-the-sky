@@ -8,6 +8,17 @@
   "browser": {
     "binding": "BROWSER",
   },
+  "worker_loaders": [
+    {
+      "binding": "LOADER",
+    },
+  ],
+  "artifacts": [
+    {
+      "binding": "ARTIFACTS",
+      "namespace": "default",
+    },
+  ],
   "durable_objects": {
     "bindings": [
       {

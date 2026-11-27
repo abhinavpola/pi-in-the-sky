@@ -20,6 +20,7 @@ import {
   createPuppeteerBrowserExecutor,
 } from "./browser";
 import { ConnectorStore, createConnectorsExtension } from "./connectors";
+import { createExtensionsExtension } from "./extensions";
 import type { HttpFetcher } from "./http-tool";
 import { createMemoryExtension, MemoryStore } from "./memory";
 import { createNearAiProvider, DEFAULT_NEARAI_MODEL } from "./providers";
@@ -35,6 +36,7 @@ const SYSTEM_PREAMBLE = [
   "Use load_skill when a relevant bundled playbook exists.",
   "Ask the user in chat for permission whenever an action is irreversible, involves spending money, or sends external communications.",
   "If a website requires sign-in, CAPTCHA, or MFA, call browser_request_takeover so the user can complete it in Live View.",
+  "When you need a reusable custom tool or computation, author it with extension_save (stored in Cloudflare Artifacts) and execute it in a sandboxed Dynamic Worker via extension_run.",
 ].join("\n");
 
 function timingSafeEqualText(a: string, b: string): boolean {
@@ -280,6 +282,12 @@ export class PersonalAgent extends DurableObject<Env> {
         (record) => {
           this.sockets.broadcastTakeover(record);
         },
+      ),
+    );
+    this.registry.install(
+      createExtensionsExtension(
+        () => this.env.ARTIFACTS,
+        () => this.env.LOADER,
       ),
     );
   }

@@ -18,6 +18,15 @@ const WORKER_METADATA = {
       type: "browser",
       name: "BROWSER",
     },
+    {
+      type: "worker_loader",
+      name: "LOADER",
+    },
+    {
+      type: "artifacts",
+      name: "ARTIFACTS",
+      namespace: "default",
+    },
   ],
   migrations: {
     new_tag: "v1",

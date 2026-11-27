@@ -36,9 +36,13 @@ export async function fetchJsonWithBearer(
   }
 }
 
-export function jsonToolResult(value: unknown): ToolExecutionResult {
+export function jsonToolResult(
+  value: unknown,
+  isError = false,
+): ToolExecutionResult {
   return {
     output: [{ type: "text", text: JSON.stringify(value) }],
+    ...(isError ? { isError: true } : {}),
   };
 }
 

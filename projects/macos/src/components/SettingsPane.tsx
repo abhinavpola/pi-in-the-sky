@@ -9,7 +9,11 @@ import {
 } from "react-native";
 
 import { validateBaseUrl } from "../agent-client";
-import { isRecord } from "../protocol-parsers";
+import {
+  buildAccessAuthorizeUrl,
+  fetchWorkerStatus,
+  refreshAccessToken,
+} from "../onboarding";
 import type { ConnectionConfig, ConnectionState } from "../types";
 
 type SettingsPaneProps = {
@@ -37,6 +41,7 @@ export function SettingsPane({
     }
     setValidationError(null);
     onSave({
+      ...config,
       baseUrl: validated.value,
       agentId: agentId.trim() || "personal",
       authToken: authToken.trim(),
@@ -51,45 +56,61 @@ export function SettingsPane({
     }
     setValidationError(null);
     setStatusMessage("Checking Cloudflare Access OAuth configuration...");
-    try {
-      const response = await fetch(`${validated.value}/auth/config`);
-      if (!response.ok) {
+    const status = await fetchWorkerStatus(validated.value);
+    switch (status.kind) {
+      case "offline":
         setStatusMessage(null);
-        setValidationError(`HTTP ${response.status} loading /auth/config`);
+        setValidationError(status.reason);
         return;
-      }
-      const data: unknown = await response.json();
-      if (
-        !isRecord(data) ||
-        data.provider !== "cloudflare_access_oauth" ||
-        typeof data.teamDomain !== "string" ||
-        typeof data.clientId !== "string"
-      ) {
+      case "live_no_oauth":
         setStatusMessage(null);
         setValidationError(
           "Cloudflare Access Managed OAuth is not configured on this Worker yet.",
         );
         return;
+      case "live_oauth_ready": {
+        await Linking.openURL(
+          buildAccessAuthorizeUrl(status.teamDomain, status.clientId),
+        );
+        setStatusMessage(
+          "Opened system browser for Cloudflare Access sign-in (with refreshable session).",
+        );
+        return;
       }
-      const origin = data.teamDomain.startsWith("https://")
-        ? data.teamDomain.replace(/\/$/, "")
-        : `https://${data.teamDomain.replace(/\/$/, "")}`;
-      const params = new URLSearchParams({
-        client_id: data.clientId,
-        response_type: "code",
-        redirect_uri: "piinthesky://auth/callback",
-        scope: "openid email profile",
-      });
-      await Linking.openURL(
-        `${origin}/cdn-cgi/access/sso/oauth2/auth?${params.toString()}`,
-      );
-      setStatusMessage("Opened system browser for Cloudflare Access sign-in.");
-    } catch (thrown) {
-      setStatusMessage(null);
-      setValidationError(
-        thrown instanceof Error ? thrown.message : String(thrown),
-      );
+      default: {
+        status satisfies never;
+      }
     }
+  };
+
+  const handleRefreshSession = async () => {
+    if (
+      !config.accessTeamDomain ||
+      !config.accessClientId ||
+      !config.refreshToken
+    ) {
+      setValidationError("No refreshable Cloudflare Access session stored.");
+      return;
+    }
+    setValidationError(null);
+    setStatusMessage("Refreshing Cloudflare Access JWT...");
+    const result = await refreshAccessToken(
+      config.accessTeamDomain,
+      config.accessClientId,
+      config.refreshToken,
+    );
+    if (!result.ok) {
+      setStatusMessage(null);
+      setValidationError(result.error);
+      return;
+    }
+    setAuthToken(result.accessToken);
+    setStatusMessage("Refreshed session token.");
+    onSave({
+      ...config,
+      authToken: result.accessToken,
+      refreshToken: result.refreshToken,
+    });
   };
 
   return (
@@ -106,14 +127,26 @@ export function SettingsPane({
         placeholderTextColor="#6b7280"
       />
 
-      <Pressable
-        style={styles.oauthButton}
-        onPress={() => {
-          void handleSignIn();
-        }}
-      >
-        <Text style={styles.buttonText}>Sign in with Cloudflare Access</Text>
-      </Pressable>
+      <View style={styles.row}>
+        <Pressable
+          style={styles.oauthButton}
+          onPress={() => {
+            void handleSignIn();
+          }}
+        >
+          <Text style={styles.buttonText}>Sign in with Cloudflare Access</Text>
+        </Pressable>
+        {config.refreshToken ? (
+          <Pressable
+            style={styles.refreshButton}
+            onPress={() => {
+              void handleRefreshSession();
+            }}
+          >
+            <Text style={styles.buttonText}>Refresh Session</Text>
+          </Pressable>
+        ) : null}
+      </View>
 
       <Text style={styles.label}>Agent ID (local dev)</Text>
       <TextInput
@@ -163,13 +196,20 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     fontSize: 13,
   },
+  row: { flexDirection: "row", gap: 8, marginTop: 4 },
   oauthButton: {
     backgroundColor: "#0f766e",
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 8,
     alignSelf: "flex-start",
-    marginTop: 4,
+  },
+  refreshButton: {
+    backgroundColor: "#334155",
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignSelf: "flex-start",
   },
   button: {
     backgroundColor: "#2563eb",

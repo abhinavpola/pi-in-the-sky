@@ -1,4 +1,4 @@
-export type ViewMode = "stream" | "memory" | "settings";
+export type ViewMode = "onboarding" | "stream" | "memory" | "settings";
 
 export type ConnectionState = "disconnected" | "connecting" | "connected";
 
@@ -6,6 +6,9 @@ export type ConnectionConfig = {
   readonly baseUrl: string;
   readonly agentId: string;
   readonly authToken: string;
+  readonly refreshToken?: string;
+  readonly accessTeamDomain?: string;
+  readonly accessClientId?: string;
 };
 
 type ChatRole = "user" | "assistant";

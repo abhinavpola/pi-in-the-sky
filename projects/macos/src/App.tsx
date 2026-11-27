@@ -3,6 +3,7 @@ import { Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
 
 import { AgentClient } from "./agent-client";
 import { MemoryPane } from "./components/MemoryPane";
+import { OnboardingView } from "./components/OnboardingView";
 import { SettingsPane } from "./components/SettingsPane";
 import { StreamView } from "./components/StreamView";
 import type {
@@ -21,7 +22,7 @@ const DEFAULT_CONFIG: ConnectionConfig = {
 };
 
 export function App() {
-  const [viewMode, setViewMode] = useState<ViewMode>("stream");
+  const [viewMode, setViewMode] = useState<ViewMode>("onboarding");
   const [showDrawer, setShowDrawer] = useState(false);
   const [config, setConfig] = useState<ConnectionConfig>(DEFAULT_CONFIG);
   const [connectionState, setConnectionState] =
@@ -78,6 +79,19 @@ export function App() {
 
   const renderContent = (mode: ViewMode) => {
     switch (mode) {
+      case "onboarding":
+        return (
+          <OnboardingView
+            initialBaseUrl={config.baseUrl}
+            onComplete={(next) => {
+              setConfig(next);
+              setErrorBanner(null);
+              client.updateConfig(next);
+              setViewMode("stream");
+            }}
+            onSkip={() => setViewMode("stream")}
+          />
+        );
       case "stream":
         return (
           <StreamView
@@ -151,6 +165,19 @@ export function App() {
             }
           >
             <Text style={styles.pillText}>Memory</Text>
+          </Pressable>
+          <Pressable
+            style={[
+              styles.pill,
+              viewMode === "onboarding" && styles.pillActive,
+            ]}
+            onPress={() =>
+              setViewMode((prev) =>
+                prev === "onboarding" ? "stream" : "onboarding",
+              )
+            }
+          >
+            <Text style={styles.pillText}>Setup</Text>
           </Pressable>
           <Pressable
             style={[styles.pill, viewMode === "settings" && styles.pillActive]}

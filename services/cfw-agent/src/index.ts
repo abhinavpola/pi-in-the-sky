@@ -288,6 +288,7 @@ export class PersonalAgent extends DurableObject<Env> {
       createExtensionsExtension(
         () => this.env.ARTIFACTS,
         () => this.env.LOADER,
+        this.ctx.id.toString(),
       ),
     );
   }

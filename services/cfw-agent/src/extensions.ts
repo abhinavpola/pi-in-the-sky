@@ -7,7 +7,7 @@ import { z } from "zod";
 import { jsonToolResult } from "./http-tool";
 import { MemoryFS } from "./memory-fs";
 
-const ARTIFACTS_REPO_NAME = "agent-extensions";
+const ARTIFACTS_REPO_PREFIX = "agent-extensions";
 const DEFAULT_BRANCH = "main";
 const EXTENSION_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const WORKSPACE_DIR = "/workspace";
@@ -41,28 +41,32 @@ function isArtifactsNotFound(thrown: unknown): boolean {
   );
 }
 
-async function openOrCreateRepo(artifacts: Artifacts): Promise<ArtifactsRepo> {
+async function openOrCreateRepo(
+  artifacts: Artifacts,
+  repoName: string,
+): Promise<ArtifactsRepo> {
   try {
-    return await artifacts.get(ARTIFACTS_REPO_NAME);
+    return await artifacts.get(repoName);
   } catch (thrown) {
     if (!isArtifactsNotFound(thrown)) {
       throw thrown;
     }
   }
-  await artifacts.create(ARTIFACTS_REPO_NAME, {
+  await artifacts.create(repoName, {
     description: "Personal agent self-authored extensions",
     readOnly: false,
     setDefaultBranch: DEFAULT_BRANCH,
   });
-  return artifacts.get(ARTIFACTS_REPO_NAME);
+  return artifacts.get(repoName);
 }
 
 async function mutateRepo(
   artifacts: Artifacts,
+  repoName: string,
   commitMessage: string,
   mutate: (fs: MemoryFS, dir: string) => Promise<readonly string[]>,
 ): Promise<{ readonly commit: string }> {
-  using repo = await openOrCreateRepo(artifacts);
+  using repo = await openOrCreateRepo(artifacts, repoName);
   const info = await repo.info();
   const existingLog = await repo.log({ ref: DEFAULT_BRANCH, limit: 1 });
   const token = await repo.createToken("write", 300);
@@ -118,7 +122,10 @@ async function mutateRepo(
   }
 }
 
-async function listSavedExtensions(artifacts: Artifacts): Promise<{
+async function listSavedExtensions(
+  artifacts: Artifacts,
+  repoName: string,
+): Promise<{
   readonly extensions: readonly ExtensionManifest[];
   readonly recentCommits: readonly {
     readonly hash: string;
@@ -128,7 +135,7 @@ async function listSavedExtensions(artifacts: Artifacts): Promise<{
 }> {
   let repo: ArtifactsRepo;
   try {
-    repo = await artifacts.get(ARTIFACTS_REPO_NAME);
+    repo = await artifacts.get(repoName);
   } catch (thrown) {
     if (isArtifactsNotFound(thrown)) {
       return { extensions: [], recentCommits: [] };
@@ -191,6 +198,7 @@ async function listSavedExtensions(artifacts: Artifacts): Promise<{
 
 async function readSavedExtension(
   artifacts: Artifacts,
+  repoName: string,
   name: string,
 ): Promise<{
   readonly code: string;
@@ -198,7 +206,7 @@ async function readSavedExtension(
 } | null> {
   let repo: ArtifactsRepo;
   try {
-    repo = await artifacts.get(ARTIFACTS_REPO_NAME);
+    repo = await artifacts.get(repoName);
   } catch (thrown) {
     if (isArtifactsNotFound(thrown)) {
       return null;
@@ -307,6 +315,7 @@ const DeleteExtensionSchema = obj({
 
 async function loadNamedExtension(
   getArtifacts: () => Artifacts | undefined,
+  repoName: string,
   name: string,
 ): Promise<
   | {
@@ -323,7 +332,7 @@ async function loadNamedExtension(
   if (!isValidExtensionName(name)) {
     return { ok: false, error: "Invalid extension name." };
   }
-  const saved = await readSavedExtension(artifacts, name);
+  const saved = await readSavedExtension(artifacts, repoName, name);
   if (!saved) {
     return { ok: false, error: `Extension "${name}" not found.` };
   }
@@ -333,7 +342,15 @@ async function loadNamedExtension(
 export function createExtensionsExtension(
   getArtifacts: () => Artifacts | undefined,
   getLoader: () => WorkerLoader | undefined,
+  agentScope: string,
 ): Extension {
+  const cleanScope = agentScope
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "")
+    .slice(0, 24);
+  const repoName = cleanScope
+    ? `${ARTIFACTS_REPO_PREFIX}-${cleanScope}`
+    : ARTIFACTS_REPO_PREFIX;
   const saveTool: ToolRegistration<typeof SaveExtensionSchema> = {
     name: "extension_save",
     description:
@@ -364,6 +381,7 @@ export function createExtensionsExtension(
       };
       const result = await mutateRepo(
         artifacts,
+        repoName,
         commitMessage?.trim() || `Save extension ${name}`,
         async (fs, dir) => {
           const codeRel = `extensions/${name}/index.js`;
@@ -394,7 +412,7 @@ export function createExtensionsExtension(
           true,
         );
       }
-      return jsonToolResult(await listSavedExtensions(artifacts));
+      return jsonToolResult(await listSavedExtensions(artifacts, repoName));
     },
   };
 
@@ -405,7 +423,7 @@ export function createExtensionsExtension(
     parameters: ReadExtensionSchema,
     replay: "safe",
     async execute({ name }) {
-      const loaded = await loadNamedExtension(getArtifacts, name);
+      const loaded = await loadNamedExtension(getArtifacts, repoName, name);
       if (!loaded.ok) {
         return jsonToolResult({ error: loaded.error }, true);
       }
@@ -435,7 +453,7 @@ export function createExtensionsExtension(
       }
       let source = code;
       if (!source && name) {
-        const loaded = await loadNamedExtension(getArtifacts, name);
+        const loaded = await loadNamedExtension(getArtifacts, repoName, name);
         if (!loaded.ok) {
           return jsonToolResult({ error: loaded.error }, true);
         }
@@ -471,6 +489,7 @@ export function createExtensionsExtension(
       }
       const result = await mutateRepo(
         artifacts,
+        repoName,
         commitMessage?.trim() || `Delete extension ${name}`,
         async (fs, dir) => {
           const codeRel = `extensions/${name}/index.js`;

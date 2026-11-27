@@ -49,7 +49,7 @@ const OkResponseSchema = z.object({ ok: z.literal(true) });
 const BASE_URL_PATTERN =
   /^(https?):\/\/(\[[^\]]+\]|[^/:?#]+)(?::\d+)?(\/.*)?$/i;
 
-export function validateBaseUrl(baseUrl: string): Result<string, string> {
+function validateBaseUrl(baseUrl: string): Result<string, string> {
   const trimmed = baseUrl.trim().replace(/\/$/, "");
   const match = BASE_URL_PATTERN.exec(trimmed);
   if (!match?.[1] || !match[2]) {

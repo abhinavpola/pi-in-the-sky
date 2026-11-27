@@ -1,7 +1,4 @@
-import {
-  type ConnectionConfig,
-  validateBaseUrl,
-} from "@pi-in-the-sky/client/agent-client";
+import type { ConnectionConfig } from "@pi-in-the-sky/client/agent-client";
 import {
   DEPLOY_TO_CLOUDFLARE_URL,
   discoverCloudflareWorker,
@@ -21,53 +18,27 @@ import {
 
 import { signInWithCloudflareAccess } from "../native";
 
-type OnboardingStep = "discover" | "deploy" | "access_login";
+type OnboardingStep = "connect" | "deploy" | "access_login";
+
+const LOCAL_DEV_URL = "http://127.0.0.1:8787";
 
 type OnboardingViewProps = {
-  readonly initialBaseUrl: string;
   readonly onComplete: (config: ConnectionConfig) => void;
-  readonly onSkip: () => void;
 };
 
-export function OnboardingView({
-  initialBaseUrl,
-  onComplete,
-  onSkip,
-}: OnboardingViewProps) {
-  const [step, setStep] = useState<OnboardingStep>("discover");
-  const [cfAccountId, setCfAccountId] = useState("");
+export function OnboardingView({ onComplete }: OnboardingViewProps) {
+  const [step, setStep] = useState<OnboardingStep>("connect");
   const [cfApiToken, setCfApiToken] = useState("");
   const [nearAiApiKey, setNearAiApiKey] = useState("");
-  const [workerUrl, setWorkerUrl] = useState(initialBaseUrl);
+  const [workerUrl, setWorkerUrl] = useState("");
   const [teamDomain, setTeamDomain] = useState("");
   const [clientId, setClientId] = useState("");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
 
-  const checkLiveness = async (candidateUrl: string) => {
-    const validated = validateBaseUrl(candidateUrl);
-    if (!validated.ok) {
-      setErrorText(validated.error);
-      return;
-    }
-    setErrorText(null);
-    if (cfAccountId.trim() && cfApiToken.trim() && nearAiApiKey.trim()) {
-      setStatusMessage("Provisioning NEAR AI secret on Worker...");
-      const provisioned = await provisionWorkerSecrets(
-        cfApiToken,
-        cfAccountId,
-        nearAiApiKey,
-      );
-      if (!provisioned.ok) {
-        setStatusMessage(null);
-        setErrorText(`Secret provisioning failed: ${provisioned.error}`);
-        return;
-      }
-      setNearAiApiKey("");
-      setCfApiToken("");
-    }
+  const verifyLiveWorker = async (candidateUrl: string) => {
     setStatusMessage("Checking Worker liveness...");
-    const status = await fetchWorkerStatus(validated.value);
+    const status = await fetchWorkerStatus(candidateUrl);
     switch (status.kind) {
       case "offline":
         setStatusMessage(null);
@@ -75,7 +46,7 @@ export function OnboardingView({
         setStep("deploy");
         return;
       case "live_no_oauth":
-        setStatusMessage("Worker is live (local dev mode).");
+        setStatusMessage(null);
         onComplete({
           baseUrl: status.baseUrl,
           authToken: LOCAL_DEV_AUTH_TOKEN,
@@ -94,19 +65,35 @@ export function OnboardingView({
     }
   };
 
-  const handleDiscover = async () => {
-    if (!cfAccountId.trim() || !cfApiToken.trim()) {
-      await checkLiveness(workerUrl);
+  const handleContinue = async () => {
+    if (!cfApiToken.trim() || !nearAiApiKey.trim()) {
+      setErrorText(
+        "Both your Cloudflare setup token and NEAR AI API key are required.",
+      );
       return;
     }
     setErrorText(null);
-    setStatusMessage("Checking your Cloudflare account for pi-in-the-sky...");
-    const result = await discoverCloudflareWorker(cfApiToken, cfAccountId);
-    switch (result.kind) {
-      case "found":
-        setWorkerUrl(result.baseUrl);
-        await checkLiveness(result.baseUrl);
+    setStatusMessage("Discovering your Cloudflare account and Worker...");
+    const discovery = await discoverCloudflareWorker(cfApiToken);
+    switch (discovery.kind) {
+      case "found": {
+        setStatusMessage("Uploading NEAR AI secret to your Worker...");
+        const provisioned = await provisionWorkerSecrets(
+          cfApiToken,
+          discovery.accountId,
+          nearAiApiKey,
+        );
+        if (!provisioned.ok) {
+          setStatusMessage(null);
+          setErrorText(`Secret provisioning failed: ${provisioned.error}`);
+          return;
+        }
+        setCfApiToken("");
+        setNearAiApiKey("");
+        setWorkerUrl(discovery.baseUrl);
+        await verifyLiveWorker(discovery.baseUrl);
         return;
+      }
       case "not_deployed":
         setStatusMessage(
           "No pi-in-the-sky Worker found on your account yet. Deploy it in 1 click below.",
@@ -115,10 +102,10 @@ export function OnboardingView({
         return;
       case "error":
         setStatusMessage(null);
-        setErrorText(result.message);
+        setErrorText(discovery.message);
         return;
       default: {
-        result satisfies never;
+        discovery satisfies never;
       }
     }
   };
@@ -127,7 +114,7 @@ export function OnboardingView({
     setErrorText(null);
     await Linking.openURL(DEPLOY_TO_CLOUDFLARE_URL);
     setStatusMessage(
-      "Opened Deploy to Cloudflare in your browser. Once finished, tap Check Liveness.",
+      "Opened Deploy to Cloudflare in your browser. Once finished, click Continue.",
     );
   };
 
@@ -150,38 +137,25 @@ export function OnboardingView({
 
   const renderStep = (current: OnboardingStep) => {
     switch (current) {
-      case "discover":
+      case "connect":
         return (
           <View style={styles.card}>
-            <Text style={styles.stepTitle}>
-              1. Connect Cloudflare or Enter Worker URL
-            </Text>
+            <Text style={styles.stepTitle}>1. Connect Cloudflare</Text>
             <Text style={styles.desc}>
-              Check whether your private pi-in-the-sky Worker is already
-              deployed on Cloudflare.
+              Your account, Worker URL, and Access login are derived
+              automatically. Your setup token is discarded immediately after
+              provisioning.
             </Text>
-            <Text style={styles.label}>Cloudflare Account ID (optional)</Text>
-            <TextInput
-              style={styles.input}
-              value={cfAccountId}
-              onChangeText={setCfAccountId}
-              placeholder="Cloudflare Account ID"
-              placeholderTextColor="#64748b"
-            />
-            <Text style={styles.label}>
-              Cloudflare Setup Token (discarded after check)
-            </Text>
+            <Text style={styles.label}>Cloudflare Setup Token</Text>
             <TextInput
               style={styles.input}
               value={cfApiToken}
               onChangeText={setCfApiToken}
               secureTextEntry
-              placeholder="Cloudflare OAuth / API token"
+              placeholder="Cloudflare API token"
               placeholderTextColor="#64748b"
             />
-            <Text style={styles.label}>
-              NEAR AI API Key (optional, auto-uploaded to Worker secrets)
-            </Text>
+            <Text style={styles.label}>NEAR AI API Key</Text>
             <TextInput
               style={styles.input}
               value={nearAiApiKey}
@@ -190,32 +164,14 @@ export function OnboardingView({
               placeholder="sk-..."
               placeholderTextColor="#64748b"
             />
-            <Text style={styles.label}>Or Existing Worker URL</Text>
-            <TextInput
-              style={styles.input}
-              value={workerUrl}
-              onChangeText={setWorkerUrl}
-              placeholder="https://pi-in-the-sky.your-subdomain.workers.dev"
-              placeholderTextColor="#64748b"
-            />
-            <View style={styles.row}>
-              <Pressable
-                style={styles.primaryButton}
-                onPress={() => {
-                  void handleDiscover();
-                }}
-              >
-                <Text style={styles.buttonText}>Check Deployment</Text>
-              </Pressable>
-              <Pressable
-                style={styles.deployButton}
-                onPress={() => {
-                  setStep("deploy");
-                }}
-              >
-                <Text style={styles.buttonText}>Deploy to Cloudflare</Text>
-              </Pressable>
-            </View>
+            <Pressable
+              style={styles.primaryButton}
+              onPress={() => {
+                void handleContinue();
+              }}
+            >
+              <Text style={styles.buttonText}>Continue</Text>
+            </Pressable>
           </View>
         );
       case "deploy":
@@ -225,39 +181,25 @@ export function OnboardingView({
               2. 1-Click Deploy to Cloudflare
             </Text>
             <Text style={styles.desc}>
-              Your personal agent Worker is not live yet. Deploy it to your own
-              Cloudflare account with 1 click, then verify liveness.
+              Deploy your private pi-in-the-sky Worker to your Cloudflare
+              account, then continue to configure secrets and sign in.
             </Text>
-            <Pressable
-              style={styles.deployButton}
-              onPress={() => {
-                void handleOpenDeploy();
-              }}
-            >
-              <Text style={styles.buttonText}>Deploy to Cloudflare</Text>
-            </Pressable>
-            <Text style={styles.label}>Deployed Worker URL</Text>
-            <TextInput
-              style={styles.input}
-              value={workerUrl}
-              onChangeText={setWorkerUrl}
-              placeholder="https://pi-in-the-sky.your-subdomain.workers.dev"
-              placeholderTextColor="#64748b"
-            />
             <View style={styles.row}>
+              <Pressable
+                style={styles.deployButton}
+                onPress={() => {
+                  void handleOpenDeploy();
+                }}
+              >
+                <Text style={styles.buttonText}>Deploy to Cloudflare</Text>
+              </Pressable>
               <Pressable
                 style={styles.primaryButton}
                 onPress={() => {
-                  void checkLiveness(workerUrl);
+                  void handleContinue();
                 }}
               >
-                <Text style={styles.buttonText}>Check Liveness</Text>
-              </Pressable>
-              <Pressable
-                style={styles.secondaryButton}
-                onPress={() => setStep("discover")}
-              >
-                <Text style={styles.buttonText}>Back</Text>
+                <Text style={styles.buttonText}>Continue</Text>
               </Pressable>
             </View>
           </View>
@@ -269,12 +211,8 @@ export function OnboardingView({
               3. Sign in with Cloudflare Access
             </Text>
             <Text style={styles.desc}>
-              Sign in once via your browser (Passkey, Google, or GitHub).
-              Includes a refreshable session token so you do not have to sign in
-              daily.
+              Worker: {workerUrl} ({teamDomain})
             </Text>
-            <Text style={styles.meta}>Worker: {workerUrl}</Text>
-            <Text style={styles.meta}>Access Team: {teamDomain}</Text>
             <Pressable
               style={styles.oauthButton}
               onPress={() => {
@@ -296,68 +234,79 @@ export function OnboardingView({
 
   return (
     <View style={styles.container}>
-      <Text style={styles.heading}>Set up Pi in the Sky</Text>
+      <Text style={styles.title}>Pi in the Sky</Text>
+      <Text style={styles.subtitle}>
+        Private personal AI running durably on your Cloudflare account.
+      </Text>
+
       {renderStep(step)}
+
       {statusMessage ? (
         <Text style={styles.status}>{statusMessage}</Text>
       ) : null}
       {errorText ? <Text style={styles.error}>{errorText}</Text> : null}
-      <Pressable style={styles.skipButton} onPress={onSkip}>
-        <Text style={styles.skipText}>Skip setup (local dev)</Text>
+
+      <Pressable
+        style={styles.localLink}
+        onPress={() => {
+          void verifyLiveWorker(LOCAL_DEV_URL);
+        }}
+      >
+        <Text style={styles.localText}>Use local dev Worker</Text>
       </Pressable>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#0b1120", padding: 20, gap: 12 },
-  heading: { color: "#f8fafc", fontSize: 18, fontWeight: "700" },
+  container: {
+    flex: 1,
+    backgroundColor: "#0f172a",
+    padding: 24,
+    justifyContent: "center",
+    gap: 12,
+  },
+  title: { color: "#f8fafc", fontSize: 24, fontWeight: "700" },
+  subtitle: { color: "#94a3b8", fontSize: 13, marginBottom: 8 },
   card: {
-    backgroundColor: "#111827",
-    borderColor: "#1e293b",
-    borderWidth: 1,
+    backgroundColor: "#1e293b",
     borderRadius: 12,
     padding: 16,
     gap: 10,
+    borderWidth: 1,
+    borderColor: "#334155",
   },
-  stepTitle: { color: "#f8fafc", fontSize: 15, fontWeight: "700" },
-  desc: { color: "#94a3b8", fontSize: 13 },
-  meta: { color: "#cbd5e1", fontSize: 12 },
+  stepTitle: { color: "#f8fafc", fontSize: 16, fontWeight: "700" },
+  desc: { color: "#cbd5e1", fontSize: 12 },
   label: { color: "#cbd5e1", fontSize: 12, fontWeight: "600", marginTop: 4 },
   input: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#0f172a",
     color: "#f8fafc",
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 8,
     fontSize: 13,
   },
-  row: { flexDirection: "row", gap: 10, marginTop: 6 },
+  row: { flexDirection: "row", gap: 8, marginTop: 6 },
   primaryButton: {
     backgroundColor: "#2563eb",
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignSelf: "flex-start",
-  },
-  deployButton: {
-    backgroundColor: "#ea580c",
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignSelf: "flex-start",
-  },
-  oauthButton: {
-    backgroundColor: "#0f766e",
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 8,
     alignSelf: "flex-start",
     marginTop: 4,
   },
-  secondaryButton: {
-    backgroundColor: "#334155",
-    paddingHorizontal: 14,
+  deployButton: {
+    backgroundColor: "#ea580c",
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignSelf: "flex-start",
+    marginTop: 4,
+  },
+  oauthButton: {
+    backgroundColor: "#0f766e",
+    paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 8,
     alignSelf: "flex-start",
@@ -365,6 +314,6 @@ const styles = StyleSheet.create({
   buttonText: { color: "#ffffff", fontSize: 13, fontWeight: "600" },
   status: { color: "#93c5fd", fontSize: 12 },
   error: { color: "#fca5a5", fontSize: 12 },
-  skipButton: { alignSelf: "flex-start", paddingVertical: 6 },
-  skipText: { color: "#94a3b8", fontSize: 12 },
+  localLink: { alignSelf: "flex-start", marginTop: 8 },
+  localText: { color: "#64748b", fontSize: 12 },
 });

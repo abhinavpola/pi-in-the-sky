@@ -132,13 +132,7 @@ export function App() {
   const renderContent = (mode: ViewMode) => {
     switch (mode) {
       case "onboarding":
-        return (
-          <OnboardingView
-            initialBaseUrl={config.baseUrl}
-            onComplete={applyAndPersistConfig}
-            onSkip={() => setViewMode("stream")}
-          />
-        );
+        return <OnboardingView onComplete={applyAndPersistConfig} />;
       case "stream":
         return (
           <StreamView

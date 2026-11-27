@@ -10,6 +10,14 @@ const DEFAULT_WORKER_NAME = "pi-in-the-sky-agent";
 export const DEPLOY_TO_CLOUDFLARE_URL = `https://deploy.workers.cloudflare.com/?url=${encodeURIComponent(WORKER_REPO_URL)}`;
 const ACCESS_REDIRECT_URI = "piinthesky://auth/callback";
 
+const AccountsResponseSchema = z.object({
+  result: z.array(
+    z.object({
+      id: z.string().min(1),
+    }),
+  ),
+});
+
 const SubdomainResponseSchema = z.object({
   result: z.object({
     subdomain: z.string().min(1),
@@ -32,8 +40,12 @@ type WorkerStatus =
     };
 
 type WorkerDiscoveryResult =
-  | { readonly kind: "found"; readonly baseUrl: string }
-  | { readonly kind: "not_deployed" }
+  | {
+      readonly kind: "found";
+      readonly accountId: string;
+      readonly baseUrl: string;
+    }
+  | { readonly kind: "not_deployed"; readonly accountId: string }
   | { readonly kind: "error"; readonly message: string };
 
 type OAuthTokenResult =
@@ -316,11 +328,32 @@ export async function fetchWorkerStatus(
 
 export async function discoverCloudflareWorker(
   cfApiToken: string,
-  accountId: string,
 ): Promise<WorkerDiscoveryResult> {
   const headers = { Authorization: `Bearer ${cfApiToken.trim()}` };
-  const cleanAccount = encodeURIComponent(accountId.trim());
   try {
+    const accountsRes = await fetch(
+      "https://api.cloudflare.com/client/v4/accounts",
+      { headers },
+    );
+    if (!accountsRes.ok) {
+      return {
+        kind: "error",
+        message: `Could not read Cloudflare accounts (HTTP ${accountsRes.status})`,
+      };
+    }
+    const accountsParsed = AccountsResponseSchema.safeParse(
+      await accountsRes.json(),
+    );
+    const accountId = accountsParsed.success
+      ? accountsParsed.data.result[0]?.id
+      : undefined;
+    if (!accountId) {
+      return {
+        kind: "error",
+        message: "No Cloudflare account found for this token.",
+      };
+    }
+    const cleanAccount = encodeURIComponent(accountId);
     const [scriptRes, subRes] = await Promise.all([
       fetch(
         `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/scripts/${DEFAULT_WORKER_NAME}`,
@@ -332,7 +365,7 @@ export async function discoverCloudflareWorker(
       ),
     ]);
     if (scriptRes.status === 404) {
-      return { kind: "not_deployed" };
+      return { kind: "not_deployed", accountId };
     }
     if (!scriptRes.ok) {
       return {
@@ -355,6 +388,7 @@ export async function discoverCloudflareWorker(
     }
     return {
       kind: "found",
+      accountId,
       baseUrl: `https://${DEFAULT_WORKER_NAME}.${parsed.data.result.subdomain}.workers.dev`,
     };
   } catch (thrown) {

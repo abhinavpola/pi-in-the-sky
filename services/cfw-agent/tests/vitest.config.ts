@@ -19,6 +19,11 @@ export default defineConfig({
       "@earendil-works/pi-telemetry",
     ],
   },
+  ssr: {
+    optimizeDeps: {
+      include: ["@nearai/inference-sdk", "@phala/dcap-qvl"],
+    },
+  },
   test: {
     name: "cfw-agent-integration",
     include: [path.join(testsDir, "**/*.test.ts")],

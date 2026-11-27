@@ -1,7 +1,15 @@
 import { useState } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  Linking,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 
 import { validateBaseUrl } from "../agent-client";
+import { isRecord } from "../protocol-parsers";
 import type { ConnectionConfig, ConnectionState } from "../types";
 
 type SettingsPaneProps = {
@@ -19,6 +27,7 @@ export function SettingsPane({
   const [agentId, setAgentId] = useState(config.agentId);
   const [authToken, setAuthToken] = useState(config.authToken);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const handleSave = () => {
     const validated = validateBaseUrl(baseUrl);
@@ -32,6 +41,55 @@ export function SettingsPane({
       agentId: agentId.trim() || "personal",
       authToken: authToken.trim(),
     });
+  };
+
+  const handleSignIn = async () => {
+    const validated = validateBaseUrl(baseUrl);
+    if (!validated.ok) {
+      setValidationError(validated.error);
+      return;
+    }
+    setValidationError(null);
+    setStatusMessage("Checking Cloudflare Access OAuth configuration...");
+    try {
+      const response = await fetch(`${validated.value}/auth/config`);
+      if (!response.ok) {
+        setStatusMessage(null);
+        setValidationError(`HTTP ${response.status} loading /auth/config`);
+        return;
+      }
+      const data: unknown = await response.json();
+      if (
+        !isRecord(data) ||
+        data.provider !== "cloudflare_access_oauth" ||
+        typeof data.teamDomain !== "string" ||
+        typeof data.clientId !== "string"
+      ) {
+        setStatusMessage(null);
+        setValidationError(
+          "Cloudflare Access Managed OAuth is not configured on this Worker yet.",
+        );
+        return;
+      }
+      const origin = data.teamDomain.startsWith("https://")
+        ? data.teamDomain.replace(/\/$/, "")
+        : `https://${data.teamDomain.replace(/\/$/, "")}`;
+      const params = new URLSearchParams({
+        client_id: data.clientId,
+        response_type: "code",
+        redirect_uri: "piinthesky://auth/callback",
+        scope: "openid email profile",
+      });
+      await Linking.openURL(
+        `${origin}/cdn-cgi/access/sso/oauth2/auth?${params.toString()}`,
+      );
+      setStatusMessage("Opened system browser for Cloudflare Access sign-in.");
+    } catch (thrown) {
+      setStatusMessage(null);
+      setValidationError(
+        thrown instanceof Error ? thrown.message : String(thrown),
+      );
+    }
   };
 
   return (
@@ -48,7 +106,16 @@ export function SettingsPane({
         placeholderTextColor="#6b7280"
       />
 
-      <Text style={styles.label}>Agent ID</Text>
+      <Pressable
+        style={styles.oauthButton}
+        onPress={() => {
+          void handleSignIn();
+        }}
+      >
+        <Text style={styles.buttonText}>Sign in with Cloudflare Access</Text>
+      </Pressable>
+
+      <Text style={styles.label}>Agent ID (local dev)</Text>
       <TextInput
         style={styles.input}
         value={agentId}
@@ -57,15 +124,19 @@ export function SettingsPane({
         placeholderTextColor="#6b7280"
       />
 
-      <Text style={styles.label}>Bearer Auth Token</Text>
+      <Text style={styles.label}>Access JWT or Local Dev Token</Text>
       <TextInput
         style={styles.input}
         value={authToken}
         onChangeText={setAuthToken}
         secureTextEntry
-        placeholder="AUTH_TOKEN"
+        placeholder="Cloudflare Access JWT or local AUTH_TOKEN"
         placeholderTextColor="#6b7280"
       />
+
+      {statusMessage ? (
+        <Text style={styles.status}>{statusMessage}</Text>
+      ) : null}
 
       {validationError ? (
         <Text style={styles.error}>{validationError}</Text>
@@ -91,6 +162,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
     fontSize: 13,
+  },
+  oauthButton: {
+    backgroundColor: "#0f766e",
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignSelf: "flex-start",
+    marginTop: 4,
   },
   button: {
     backgroundColor: "#2563eb",

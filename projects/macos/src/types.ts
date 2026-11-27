@@ -1,4 +1,4 @@
-export type TabId = "chat" | "memory" | "settings";
+export type ViewMode = "stream" | "memory" | "settings";
 
 export type ConnectionState = "disconnected" | "connecting" | "connected";
 
@@ -14,6 +14,20 @@ export type ChatMessage = {
   readonly id: string;
   readonly role: ChatRole;
   readonly text: string;
+};
+
+export type ActivityStatus =
+  "running" | "waiting_input" | "completed" | "failed" | "cancelled";
+
+export type ActivityItem = {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly status: ActivityStatus;
+  readonly collapsed: boolean;
+  readonly createdAt: number;
+  readonly updatedAt: number;
 };
 
 export type TakeoverItem = {
@@ -49,9 +63,10 @@ export type IncomingView = {
 };
 
 export type IncomingSocketMessage =
-  | { readonly type: "hello" }
+  | { readonly type: "hello"; readonly activities: readonly ActivityItem[] }
   | { readonly type: "view"; readonly view: IncomingView }
   | { readonly type: "ops" }
   | { readonly type: "takeover_requested"; readonly takeover: TakeoverItem }
+  | { readonly type: "activity_updated"; readonly activity: ActivityItem }
   | { readonly type: "result" }
   | { readonly type: "error"; readonly message: string };

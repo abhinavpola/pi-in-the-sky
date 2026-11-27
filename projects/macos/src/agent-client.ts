@@ -1,11 +1,18 @@
 import { err, ok, type Result } from "@pi-in-the-sky/result-monad";
 
+import {
+  extractMessagesFromView,
+  isRecord,
+  parseIncomingSocketMessage,
+  parseMemoryNote,
+  parseProfileEntry,
+} from "./protocol-parsers";
 import type {
+  ActivityItem,
   ChatMessage,
   ConnectionConfig,
   ConnectionState,
   IncomingSocketMessage,
-  IncomingView,
   MemoryNote,
   ProfileEntry,
   TakeoverItem,
@@ -14,200 +21,11 @@ import type {
 type ClientHandlers = {
   readonly onConnectionChange: (state: ConnectionState) => void;
   readonly onMessagesChange: (messages: ChatMessage[]) => void;
+  readonly onActivitiesChange: (activities: ActivityItem[]) => void;
   readonly onTakeoverRequested: (takeover: TakeoverItem) => void;
   readonly onReset: () => void;
   readonly onError: (message: string) => void;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function readString(
-  record: Record<string, unknown>,
-  key: string,
-): string | null {
-  const value = record[key];
-  return typeof value === "string" ? value : null;
-}
-
-function readNumber(
-  record: Record<string, unknown>,
-  key: string,
-): number | null {
-  const value = record[key];
-  return typeof value === "number" ? value : null;
-}
-
-function extractTextContent(content: unknown): string {
-  if (typeof content === "string") {
-    return content;
-  }
-  if (!Array.isArray(content)) {
-    return "";
-  }
-  const parts: string[] = [];
-  for (const item of content) {
-    if (
-      isRecord(item) &&
-      item.type === "text" &&
-      typeof item.text === "string"
-    ) {
-      parts.push(item.text);
-    }
-  }
-  return parts.join("\n");
-}
-
-function parseIncomingView(raw: unknown): IncomingView {
-  if (!isRecord(raw)) {
-    return {};
-  }
-  const entries = Array.isArray(raw.entries) ? raw.entries : undefined;
-  if (!isRecord(raw.pi) || !isRecord(raw.pi.live)) {
-    return { entries };
-  }
-  const liveRaw = raw.pi.live;
-  const message = isRecord(liveRaw.message)
-    ? { content: liveRaw.message.content }
-    : undefined;
-  const error = typeof liveRaw.error === "string" ? liveRaw.error : undefined;
-  return {
-    entries,
-    pi: { live: { message, error } },
-  };
-}
-
-function parseTakeover(raw: unknown): TakeoverItem | null {
-  if (!isRecord(raw)) {
-    return null;
-  }
-  const id = readString(raw, "id");
-  const url = readString(raw, "url");
-  const reason = readString(raw, "reason");
-  const status = raw.status;
-  if (
-    !id ||
-    !url ||
-    !reason ||
-    (status !== "waiting" && status !== "resumed")
-  ) {
-    return null;
-  }
-  const liveViewUrl =
-    typeof raw.liveViewUrl === "string" ? raw.liveViewUrl : null;
-  return { id, url, liveViewUrl, reason, status };
-}
-
-function parseIncomingSocketMessage(
-  raw: unknown,
-): IncomingSocketMessage | null {
-  if (!isRecord(raw) || typeof raw.type !== "string") {
-    return null;
-  }
-  switch (raw.type) {
-    case "hello":
-      return { type: "hello" };
-    case "result":
-      return { type: "result" };
-    case "ops":
-      return { type: "ops" };
-    case "view":
-      return { type: "view", view: parseIncomingView(raw.view) };
-    case "takeover_requested": {
-      const takeover = parseTakeover(raw.takeover);
-      return takeover ? { type: "takeover_requested", takeover } : null;
-    }
-    case "error":
-      return {
-        type: "error",
-        message: readString(raw, "message") ?? "Unknown agent error",
-      };
-    default:
-      return null;
-  }
-}
-
-function parseProfileEntry(raw: unknown): ProfileEntry | null {
-  if (!isRecord(raw)) {
-    return null;
-  }
-  const key = readString(raw, "key");
-  const value = readString(raw, "value");
-  const updatedAt = readNumber(raw, "updatedAt");
-  if (!key || value === null || updatedAt === null) {
-    return null;
-  }
-  return { key, value, updatedAt };
-}
-
-function parseMemoryNote(raw: unknown): MemoryNote | null {
-  if (!isRecord(raw)) {
-    return null;
-  }
-  const id = readNumber(raw, "id");
-  const date = readString(raw, "date");
-  const category = readString(raw, "category");
-  const content = readString(raw, "content");
-  const createdAt = readNumber(raw, "createdAt");
-  if (
-    id === null ||
-    date === null ||
-    category === null ||
-    content === null ||
-    createdAt === null
-  ) {
-    return null;
-  }
-  return { id, date, category, content, createdAt };
-}
-
-function extractMessagesFromView(view: IncomingView): {
-  readonly messages: ChatMessage[];
-  readonly liveError: string | null;
-} {
-  const entries = view.entries ?? [];
-  const result: ChatMessage[] = [];
-  for (const raw of entries) {
-    if (!isRecord(raw) || !Array.isArray(raw.model)) {
-      continue;
-    }
-    const entryId =
-      typeof raw.id === "number" || typeof raw.id === "string"
-        ? String(raw.id)
-        : String(result.length);
-    for (const part of raw.model) {
-      if (!isRecord(part)) {
-        continue;
-      }
-      if (part.role !== "user" && part.role !== "assistant") {
-        continue;
-      }
-      const text = extractTextContent(part.content);
-      if (text) {
-        result.push({
-          id: `${entryId}-${part.role}`,
-          role: part.role,
-          text,
-        });
-      }
-    }
-  }
-  const live = view.pi?.live;
-  const liveText = extractTextContent(live?.message?.content);
-  if (liveText) {
-    result.push({
-      id: "pi-live-assistant",
-      role: "assistant",
-      text: liveText,
-    });
-  }
-  const liveError =
-    typeof live?.error === "string" && live.error.length > 0
-      ? live.error
-      : null;
-  return { messages: result, liveError };
-}
 
 const BASE_URL_PATTERN =
   /^(https?):\/\/(\[[^\]]+\]|[^/:?#]+)(?::\d+)?(\/.*)?$/i;
@@ -289,6 +107,7 @@ export class AgentClient {
   readonly #handlers: ClientHandlers;
   #socket: WebSocket | null = null;
   #messages: ChatMessage[] = [];
+  #activities: ActivityItem[] = [];
   #commandSeq = 0;
 
   constructor(config: ConnectionConfig, handlers: ClientHandlers) {
@@ -299,7 +118,9 @@ export class AgentClient {
   updateConfig(config: ConnectionConfig): void {
     this.#config = config;
     this.#messages = [];
+    this.#activities = [];
     this.#handlers.onMessagesChange([]);
+    this.#handlers.onActivitiesChange([]);
     this.#handlers.onReset();
     this.disconnect();
     this.connect();
@@ -381,6 +202,36 @@ export class AgentClient {
     });
   }
 
+  steerActivity(activityId: string, instruction: string): boolean {
+    const trimmed = instruction.trim();
+    if (!trimmed) {
+      return false;
+    }
+    return this.#send({
+      type: "steer_activity",
+      id: this.#nextId("steer"),
+      activityId,
+      instruction: trimmed,
+    });
+  }
+
+  toggleActivity(activityId: string, collapsed: boolean): void {
+    this.#send({
+      type: "toggle_activity",
+      id: this.#nextId("toggle"),
+      activityId,
+      collapsed,
+    });
+  }
+
+  compactThread(summary: string): void {
+    this.#send({
+      type: "compact",
+      id: this.#nextId("compact"),
+      summary,
+    });
+  }
+
   abort(): void {
     this.#send({ type: "abort", id: this.#nextId("abort") });
   }
@@ -455,7 +306,11 @@ export class AgentClient {
 
   #handleIncoming(message: IncomingSocketMessage): void {
     switch (message.type) {
-      case "hello":
+      case "hello": {
+        this.#activities = [...message.activities];
+        this.#handlers.onActivitiesChange(this.#activities);
+        return;
+      }
       case "result":
         return;
       case "view": {
@@ -473,6 +328,15 @@ export class AgentClient {
       }
       case "takeover_requested": {
         this.#handlers.onTakeoverRequested(message.takeover);
+        return;
+      }
+      case "activity_updated": {
+        const next = [
+          message.activity,
+          ...this.#activities.filter((a) => a.id !== message.activity.id),
+        ];
+        this.#activities = next;
+        this.#handlers.onActivitiesChange(this.#activities);
         return;
       }
       case "error": {

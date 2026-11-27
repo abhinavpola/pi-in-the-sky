@@ -1,10 +1,10 @@
-import type { WatchEnd } from "@earendil-works/chord/watch";
 import type {
   ConversationView,
   ConversationWatch,
   ConversationWindow,
   EntryQuery,
   RegistryReader,
+  WatchEnd,
 } from "@earendil-works/pi-durable";
 import {
   type PiHarness,
@@ -14,6 +14,7 @@ import {
 import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
 
+import type { ActivityRecord } from "./activities";
 import type { BrowserTakeoverRecord } from "./browser";
 import {
   type ClientMessage,
@@ -72,7 +73,17 @@ type SocketCallbacks = {
     note?: string,
   ) => Promise<CommandResult>;
   readonly onClearWaitingTakeovers: () => void;
-  readonly listWaitingTakeovers: () => BrowserTakeoverRecord[];
+  readonly listWaitingTakeovers: () => Promise<BrowserTakeoverRecord[]>;
+  readonly listActivities: () => Promise<ActivityRecord[]>;
+  readonly onSteerActivity: (
+    activityId: string,
+    instruction: string,
+  ) => Promise<CommandResult>;
+  readonly onToggleActivity: (
+    activityId: string,
+    collapsed: boolean,
+  ) => Promise<CommandResult>;
+  readonly onCompactThread: (summary: string) => Promise<CommandResult>;
 };
 
 export class AgentSockets {
@@ -119,6 +130,16 @@ export class AgentSockets {
     }
   }
 
+  broadcastActivity(activity: ActivityRecord): void {
+    const message: ServerMessage = {
+      type: "activity_updated",
+      activity,
+    };
+    for (const socket of this.#getWebSockets()) {
+      send(socket, message);
+    }
+  }
+
   async reattach(): Promise<void> {
     if (this.#getWebSockets().length === 0) {
       return;
@@ -135,6 +156,7 @@ export class AgentSockets {
     ctx: ConnectionContext,
   ): Promise<void> {
     const session = sessionFromRequest(ctx.request, ROOT_SESSION);
+    const activities = await this.#callbacks.listActivities();
     send(connection, {
       type: "hello",
       session,
@@ -145,8 +167,10 @@ export class AgentSockets {
           name: tool.name,
           description: tool.description,
         })),
+      activities,
     });
-    for (const takeover of this.#callbacks.listWaitingTakeovers()) {
+    const takeovers = await this.#callbacks.listWaitingTakeovers();
+    for (const takeover of takeovers) {
       send(connection, { type: "takeover_requested", takeover });
     }
   }
@@ -165,7 +189,7 @@ export class AgentSockets {
     this.#watches.set(socket, watch);
     void previous?.stop();
     let last = watch.value;
-    send(socket, { type: "view", session, view: last });
+    send(socket, { type: "view", view: last });
     watch.start(async (call) => {
       if (call.kind !== "value") {
         return;
@@ -175,7 +199,7 @@ export class AgentSockets {
         return;
       }
       last = call.value;
-      send(socket, { type: "ops", session, ops: call.ops });
+      send(socket, { type: "ops", ops: call.ops });
     });
     void watch.closed.then((end) =>
       this.#ended(socket, session, watch, end, last),
@@ -217,24 +241,23 @@ export class AgentSockets {
 
   async #unwatch(socket: WebSocket): Promise<void> {
     const watch = this.#watches.get(socket);
-    if (!watch) {
-      return;
-    }
     this.#watches.delete(socket);
-    await watch.stop();
+    await watch?.stop();
   }
 
   async #onMessage(
     connection: Connection,
     message: WebSocketMessage,
   ): Promise<void> {
-    const raw =
-      typeof message === "string" ? message : new TextDecoder().decode(message);
+    if (typeof message !== "string") {
+      send(connection, { type: "error", message: "Expected text frame" });
+      return;
+    }
     let parsedJson: unknown;
     try {
-      parsedJson = JSON.parse(raw);
+      parsedJson = JSON.parse(message);
     } catch {
-      send(connection, { type: "error", message: "Invalid JSON payload" });
+      send(connection, { type: "error", message: "Invalid JSON" });
       return;
     }
     const parsed = ClientMessageSchema.safeParse(parsedJson);
@@ -248,9 +271,11 @@ export class AgentSockets {
       const result = await this.#handle(connection, session, msg);
       send(connection, { type: "result", id: msg.id, result });
     } catch (thrown) {
-      const errorMessage =
-        thrown instanceof Error ? thrown.message : String(thrown);
-      send(connection, { type: "error", id: msg.id, message: errorMessage });
+      send(connection, {
+        type: "error",
+        id: msg.id,
+        message: thrown instanceof Error ? thrown.message : String(thrown),
+      });
     }
   }
 
@@ -279,6 +304,9 @@ export class AgentSockets {
         await this.#harness.session(session).reset(msg.handoff);
         return { ok: true };
       }
+      case "compact": {
+        return this.#callbacks.onCompactThread(msg.summary);
+      }
       case "entries": {
         const query: Omit<EntryQuery, "conversationId"> = msg.query ?? {};
         const limit = Math.max(1, Math.min(msg.limit, 200));
@@ -286,6 +314,12 @@ export class AgentSockets {
       }
       case "resume_takeover": {
         return this.#callbacks.onResumeTakeover(msg.takeoverId, msg.note);
+      }
+      case "steer_activity": {
+        return this.#callbacks.onSteerActivity(msg.activityId, msg.instruction);
+      }
+      case "toggle_activity": {
+        return this.#callbacks.onToggleActivity(msg.activityId, msg.collapsed);
       }
       default: {
         msg satisfies never;

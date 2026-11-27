@@ -1,5 +1,7 @@
 import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
-import { int, obj, opt, str } from "@earendil-works/pi-schema";
+import { num, obj, opt, str } from "@earendil-works/pi-schema";
+
+import type { VaultCipher } from "./vault";
 
 export type ProfileEntry = {
   readonly key: string;
@@ -15,222 +17,189 @@ export type MemoryNote = {
   readonly createdAt: number;
 };
 
+type ProfileRow = {
+  key: string;
+  value_enc: string;
+  updated_at: number;
+};
+
+type NoteRow = {
+  id: number;
+  date: string;
+  category: string;
+  content_enc: string;
+  created_at: number;
+};
+
+function todayIsoDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 export class MemoryStore {
   readonly #sql: SqlStorage;
+  readonly #vault: VaultCipher;
 
-  constructor(sql: SqlStorage) {
+  constructor(sql: SqlStorage, vault: VaultCipher) {
     this.#sql = sql;
-    this.#migrate();
-  }
-
-  #migrate(): void {
+    this.#vault = vault;
     this.#sql.exec(`
-      CREATE TABLE IF NOT EXISTS user_profile (
+      CREATE TABLE IF NOT EXISTS user_profile_vault (
         key TEXT PRIMARY KEY,
-        value TEXT NOT NULL,
+        value_enc TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS memory_notes (
+      CREATE TABLE IF NOT EXISTS memory_notes_vault (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT NOT NULL,
         category TEXT NOT NULL,
-        content TEXT NOT NULL,
+        content_enc TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
-
-      CREATE VIRTUAL TABLE IF NOT EXISTS memory_notes_fts USING fts5(
-        content,
-        category,
-        content='memory_notes',
-        content_rowid='id'
-      );
-
-      CREATE TRIGGER IF NOT EXISTS memory_notes_ai AFTER INSERT ON memory_notes BEGIN
-        INSERT INTO memory_notes_fts(rowid, content, category)
-        VALUES (new.id, new.content, new.category);
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS memory_notes_ad AFTER DELETE ON memory_notes BEGIN
-        INSERT INTO memory_notes_fts(memory_notes_fts, rowid, content, category)
-        VALUES ('delete', old.id, old.content, old.category);
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS memory_notes_au AFTER UPDATE ON memory_notes BEGIN
-        INSERT INTO memory_notes_fts(memory_notes_fts, rowid, content, category)
-        VALUES ('delete', old.id, old.content, old.category);
-        INSERT INTO memory_notes_fts(rowid, content, category)
-        VALUES (new.id, new.content, new.category);
-      END;
     `);
   }
 
-  getProfile(): ProfileEntry[] {
+  async getProfile(): Promise<ProfileEntry[]> {
     const rows = this.#sql
-      .exec<{ key: string; value: string; updated_at: number }>(
-        "SELECT key, value, updated_at FROM user_profile ORDER BY key ASC",
+      .exec<ProfileRow>(
+        "SELECT key, value_enc, updated_at FROM user_profile_vault ORDER BY key ASC",
       )
       .toArray();
-    return rows.map((row) => ({
-      key: row.key,
-      value: row.value,
-      updatedAt: row.updated_at,
-    }));
-  }
-
-  setProfileEntry(key: string, value: string): ProfileEntry {
-    const updatedAt = Date.now();
-    this.#sql.exec(
-      `INSERT INTO user_profile (key, value, updated_at)
-       VALUES (?, ?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-      key,
-      value,
-      updatedAt,
-    );
-    return { key, value, updatedAt };
-  }
-
-  deleteProfileEntry(key: string): boolean {
-    const before = this.#sql
-      .exec<{ count: number }>(
-        "SELECT COUNT(*) AS count FROM user_profile WHERE key = ?",
-        key,
-      )
-      .one().count;
-    if (before === 0) {
-      return false;
+    const entries: ProfileEntry[] = [];
+    for (const row of rows) {
+      const value = await this.#vault.decryptText(
+        row.value_enc,
+        `user_profile:${row.key}`,
+      );
+      entries.push({
+        key: row.key,
+        value,
+        updatedAt: row.updated_at,
+      });
     }
-    this.#sql.exec("DELETE FROM user_profile WHERE key = ?", key);
-    return true;
+    return entries;
   }
 
-  addNote(content: string, category = "general", date?: string): MemoryNote {
-    const createdAt = Date.now();
-    const resolvedDate = date ?? new Date(createdAt).toISOString().slice(0, 10);
+  async setProfileEntry(key: string, value: string): Promise<ProfileEntry> {
+    const now = Date.now();
+    const encrypted = await this.#vault.encryptText(
+      value,
+      `user_profile:${key}`,
+    );
     this.#sql.exec(
-      "INSERT INTO memory_notes (date, category, content, created_at) VALUES (?, ?, ?, ?)",
-      resolvedDate,
+      `INSERT INTO user_profile_vault (key, value_enc, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value_enc = excluded.value_enc, updated_at = excluded.updated_at`,
+      key,
+      encrypted,
+      now,
+    );
+    return { key, value, updatedAt: now };
+  }
+
+  async addNote(
+    content: string,
+    category = "general",
+    date?: string,
+  ): Promise<MemoryNote> {
+    const noteDate = date ?? todayIsoDate();
+    const now = Date.now();
+    const encrypted = await this.#vault.encryptText(
+      content,
+      `memory_notes:${noteDate}:${category}`,
+    );
+    this.#sql.exec(
+      "INSERT INTO memory_notes_vault (date, category, content_enc, created_at) VALUES (?, ?, ?, ?)",
+      noteDate,
+      category,
+      encrypted,
+      now,
+    );
+    const idRow = this.#sql
+      .exec<{ id: number }>("SELECT last_insert_rowid() AS id")
+      .toArray()[0];
+    return {
+      id: idRow?.id ?? 0,
+      date: noteDate,
       category,
       content,
-      createdAt,
-    );
-    const row = this.#sql
-      .exec<{
-        id: number;
-        date: string;
-        category: string;
-        content: string;
-        created_at: number;
-      }>(
-        "SELECT id, date, category, content, created_at FROM memory_notes ORDER BY id DESC LIMIT 1",
+      createdAt: now,
+    };
+  }
+
+  async searchNotes(query: string, limit = 10): Promise<MemoryNote[]> {
+    const clampedLimit = Math.max(1, Math.min(limit, 50));
+    const trimmed = query.trim().toLowerCase();
+    const rows = this.#sql
+      .exec<NoteRow>(
+        "SELECT id, date, category, content_enc, created_at FROM memory_notes_vault ORDER BY created_at DESC LIMIT 500",
       )
-      .one();
-    return {
-      id: row.id,
-      date: row.date,
-      category: row.category,
-      content: row.content,
-      createdAt: row.created_at,
-    };
-  }
-
-  #toNote(row: {
-    id: number;
-    date: string;
-    category: string;
-    content: string;
-    created_at: number;
-  }): MemoryNote {
-    return {
-      id: row.id,
-      date: row.date,
-      category: row.category,
-      content: row.content,
-      createdAt: row.created_at,
-    };
-  }
-
-  searchNotes(query: string, limit = 10): MemoryNote[] {
-    const trimmed = query.trim();
-    if (!trimmed) {
-      return this.listRecentNotes(limit);
+      .toArray();
+    const tokens = trimmed ? trimmed.split(/\s+/).filter(Boolean) : [];
+    const results: MemoryNote[] = [];
+    for (const row of rows) {
+      const content = await this.#vault.decryptText(
+        row.content_enc,
+        `memory_notes:${row.date}:${row.category}`,
+      );
+      if (tokens.length > 0) {
+        const haystack = `${row.date} ${row.category} ${content}`.toLowerCase();
+        if (!tokens.every((token) => haystack.includes(token))) {
+          continue;
+        }
+      }
+      results.push({
+        id: row.id,
+        date: row.date,
+        category: row.category,
+        content,
+        createdAt: row.created_at,
+      });
+      if (results.length >= clampedLimit) {
+        break;
+      }
     }
-    const sanitized = trimmed
-      .split(/\s+/)
-      .map((term) => `"${term.replaceAll('"', '""')}"`)
-      .join(" OR ");
-    const rows = this.#sql
-      .exec<{
-        id: number;
-        date: string;
-        category: string;
-        content: string;
-        created_at: number;
-      }>(
-        `SELECT m.id, m.date, m.category, m.content, m.created_at
-         FROM memory_notes m
-         JOIN memory_notes_fts f ON f.rowid = m.id
-         WHERE memory_notes_fts MATCH ?
-         ORDER BY bm25(memory_notes_fts), m.created_at DESC
-         LIMIT ?`,
-        sanitized,
-        Math.max(1, Math.min(limit, 50)),
-      )
-      .toArray();
-    return rows.map((row) => this.#toNote(row));
+    return results;
   }
 
-  listRecentNotes(limit = 10): MemoryNote[] {
-    const rows = this.#sql
-      .exec<{
-        id: number;
-        date: string;
-        category: string;
-        content: string;
-        created_at: number;
-      }>(
-        "SELECT id, date, category, content, created_at FROM memory_notes ORDER BY created_at DESC, id DESC LIMIT ?",
-        Math.max(1, Math.min(limit, 50)),
-      )
-      .toArray();
-    return rows.map((row) => this.#toNote(row));
-  }
-
-  renderProfilePrompt(): string {
-    const entries = this.getProfile();
+  async renderProfileSummary(): Promise<string> {
+    const entries = await this.getProfile();
     if (entries.length === 0) {
-      return "User profile is empty. Save durable preferences with memory_set_profile.";
+      return "No stored user profile facts yet.";
     }
-    const lines = entries.map((entry) => `- ${entry.key}: ${entry.value}`);
-    return ["User profile:", ...lines].join("\n");
+    return entries.map((e) => `- ${e.key}: ${e.value}`).join("\n");
   }
 }
 
 const EmptySchema = obj({});
+
 const SetProfileSchema = obj({
   key: str(),
   value: str(),
 });
+
 const WriteNoteSchema = obj({
   content: str(),
   category: opt(str()),
   date: opt(str()),
 });
+
 const SearchMemorySchema = obj({
   query: str(),
-  limit: opt(int()),
+  limit: opt(num()),
 });
 
-export function createMemoryExtension(memory: MemoryStore): Extension {
+export function createMemoryExtension(store: MemoryStore): Extension {
   const getProfileTool: ToolRegistration<typeof EmptySchema> = {
     name: "memory_get_profile",
-    description: "Read all standing user profile facts and preferences.",
+    description:
+      "Read all stored user profile facts (standing preferences like home_airport, airline_loyalty, timezone, seat_preference).",
     parameters: EmptySchema,
     replay: "safe",
     async execute() {
+      const entries = await store.getProfile();
       return {
-        output: [{ type: "text", text: JSON.stringify(memory.getProfile()) }],
+        output: [{ type: "text", text: JSON.stringify({ entries }) }],
       };
     },
   };
@@ -238,26 +207,27 @@ export function createMemoryExtension(memory: MemoryStore): Extension {
   const setProfileTool: ToolRegistration<typeof SetProfileSchema> = {
     name: "memory_set_profile",
     description:
-      "Save or update a standing user profile preference such as home_airport, timezone, or seating_preference.",
+      "Upsert a standing user profile preference or fact so future conversations remember it.",
     parameters: SetProfileSchema,
     replay: "safe",
     async execute({ key, value }) {
-      const saved = memory.setProfileEntry(key, value);
+      const entry = await store.setProfileEntry(key, value);
       return {
-        output: [{ type: "text", text: JSON.stringify(saved) }],
+        output: [{ type: "text", text: JSON.stringify(entry) }],
       };
     },
   };
 
   const writeNoteTool: ToolRegistration<typeof WriteNoteSchema> = {
     name: "memory_write_note",
-    description: "Record a dated note for future recall via full-text search.",
+    description:
+      "Save a dated encrypted note (trips, bookings, decisions, follow-ups) to long-term memory.",
     parameters: WriteNoteSchema,
-    replay: "unsafe",
+    replay: "safe",
     async execute({ content, category, date }) {
-      const saved = memory.addNote(content, category, date);
+      const note = await store.addNote(content, category ?? "general", date);
       return {
-        output: [{ type: "text", text: JSON.stringify(saved) }],
+        output: [{ type: "text", text: JSON.stringify(note) }],
       };
     },
   };
@@ -265,25 +235,25 @@ export function createMemoryExtension(memory: MemoryStore): Extension {
   const searchMemoryTool: ToolRegistration<typeof SearchMemorySchema> = {
     name: "memory_search",
     description:
-      "Search stored dated notes using SQLite FTS5 full-text search.",
+      "Search encrypted dated memory notes for past trips, preferences, bookings, and facts.",
     parameters: SearchMemorySchema,
     replay: "safe",
     async execute({ query, limit }) {
-      const results = memory.searchNotes(query, limit);
+      const notes = await store.searchNotes(query, limit ?? 10);
       return {
-        output: [{ type: "text", text: JSON.stringify(results) }],
+        output: [{ type: "text", text: JSON.stringify({ notes }) }],
       };
     },
   };
 
   return {
     name: "memory",
+    tools: [getProfileTool, setProfileTool, writeNoteTool, searchMemoryTool],
     sections: [
       {
-        key: "memory_profile",
-        render: () => memory.renderProfilePrompt(),
+        key: "user-profile",
+        render: () => store.renderProfileSummary(),
       },
     ],
-    tools: [getProfileTool, setProfileTool, writeNoteTool, searchMemoryTool],
   };
 }

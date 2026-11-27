@@ -1,13 +1,19 @@
 import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
-import { PiHarness, type PiModel, type PiReceipt } from "agents/harness/pi";
+import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
+import {
+  PiHarness,
+  type PiModel,
+  type PiReceipt,
+  ROOT_SESSION,
+} from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
-import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
 import { DurableObject } from "cloudflare:workers";
-import { z } from "zod";
 
 import type { Env } from "../env";
+import { verifyCloudflareAccessJwt } from "./access-auth";
+import { ActivityStore, createActivitiesExtension } from "./activities";
 import {
   BrowserStore,
   BrowserTakeoverSignal,
@@ -25,57 +31,25 @@ import {
   MemoryStore,
   type ProfileEntry,
 } from "./memory";
+import { createNearAiProvider, DEFAULT_NEARAI_MODEL } from "./providers";
+import { handleAgentHttpRequest } from "./routes";
 import { createSkillsExtension } from "./skills";
 import { AgentSockets } from "./sockets";
-
-const DEFAULT_MODEL_ID = "@cf/moonshotai/kimi-k2.5";
+import { VaultCipher } from "./vault";
+import { createEncryptedSqliteDatabase } from "./vault-sqlite";
 
 const SYSTEM_PREAMBLE = [
-  "You are a private, autonomous personal AI assistant running durably on Cloudflare.",
-  "Use your memory tools to recall and update durable user preferences and dated notes.",
+  "You are a private, autonomous personal AI assistant running durably on Cloudflare with end-to-end encrypted storage and attested TEE inference.",
+  "This is one continuous conversation with your user—never ask them to pick a thread or start a new chat.",
+  "For multi-step or backgroundable tasks (trip research, inbox triage, bookings, monitoring), call activity_spawn to launch a dedicated subagent session so the main stream stays responsive.",
+  "When the user sends a follow-up that could apply to more than one active activity, ask a brief clarifying question before steering.",
+  "Use your encrypted memory tools to recall and update durable user preferences and dated notes.",
   "Use load_skill when a relevant bundled playbook exists.",
   "Ask the user in chat for permission whenever an action is irreversible, involves spending money, or sends external communications.",
   "If a website requires sign-in, CAPTCHA, or MFA, call browser_request_takeover so the user can complete it in Live View.",
 ].join("\n");
 
-const PromptBodySchema = z.object({
-  input: z.string().min(1),
-  operationId: z.string().optional(),
-  sessionId: z.string().optional(),
-});
-
-const ProfileBodySchema = z.object({
-  key: z.string().min(1),
-  value: z.string(),
-});
-
-const ConnectorBodySchema = z.object({
-  accessToken: z.string().min(1),
-  refreshToken: z.string().optional(),
-  expiresAt: z.number().optional(),
-});
-
-const NoteBodySchema = z.object({
-  content: z.string().min(1),
-  category: z.string().optional(),
-  date: z.string().optional(),
-});
-
-const ResumeTakeoverBodySchema = z.object({
-  note: z.string().optional(),
-});
-
-function parseConnectorProvider(value: string): ConnectorProvider | null {
-  switch (value) {
-    case "gmail":
-    case "google_calendar":
-      return value;
-    default:
-      return null;
-  }
-}
-
-function isAuthorized(request: Request, env: Env): boolean {
+function hasLocalDevBearerAuth(request: Request, env: Env): boolean {
   if (!env.AUTH_TOKEN) {
     return false;
   }
@@ -92,7 +66,10 @@ function withCors(response: Response): Response {
     "Access-Control-Allow-Methods",
     "GET, POST, PUT, DELETE, OPTIONS",
   );
-  headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  headers.set(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, Cf-Access-Jwt-Assertion",
+  );
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
@@ -101,17 +78,29 @@ function withCors(response: Response): Response {
 }
 
 export class PersonalAgent extends DurableObject<Env> {
-  readonly memory = new MemoryStore(this.ctx.storage.sql);
-  readonly connectors = new ConnectorStore(this.ctx.storage.sql);
-  readonly browser = new BrowserStore(this.ctx.storage.sql);
+  readonly vault = new VaultCipher(
+    this.ctx.storage.sql,
+    () => this.env.VAULT_MASTER_KEY,
+  );
+  readonly memory = new MemoryStore(this.ctx.storage.sql, this.vault);
+  readonly connectors = new ConnectorStore(this.ctx.storage.sql, this.vault);
+  readonly browser = new BrowserStore(this.ctx.storage.sql, this.vault);
+  readonly activities = new ActivityStore(this.ctx.storage.sql, this.vault);
   readonly registry = createRegistry();
 
   readonly harness = new PiHarness({
-    harness: async ({ storage, context, onWake }) => {
+    harness: async ({ context, onWake }) => {
       this.#installExtensions();
+      const encryptedDb = createEncryptedSqliteDatabase(
+        this.ctx.storage,
+        this.vault,
+      );
+      const encryptedStorage = await SqliteStorage.open(encryptedDb, {
+        prefix: "pi_vault",
+      });
       const { models } = this.createModelRegistry();
       return Harness.open(
-        storage,
+        encryptedStorage,
         {
           models,
           registry: this.registry,
@@ -137,6 +126,12 @@ export class PersonalAgent extends DurableObject<Env> {
         this.resumeTakeover(takeoverId, note),
       onClearWaitingTakeovers: () => this.browser.clearWaitingTakeovers(),
       listWaitingTakeovers: () => this.browser.listWaitingTakeovers(),
+      listActivities: () => this.activities.listActivities(),
+      onSteerActivity: (activityId, instruction) =>
+        this.steerActivity(activityId, instruction),
+      onToggleActivity: (activityId, collapsed) =>
+        this.toggleActivity(activityId, collapsed),
+      onCompactThread: (summary) => this.compactThread(summary),
     },
   );
 
@@ -149,16 +144,21 @@ export class PersonalAgent extends DurableObject<Env> {
   #extensionsInstalled = false;
 
   protected createModelRegistry(): { models: MutableModels } {
-    const ai = createAI({ binding: this.env.AI });
     const models = createModels();
-    models.setProvider(ai.provider);
+    models.setProvider(
+      createNearAiProvider(
+        () => this.env.NEARAI_API_KEY,
+        () => this.env.NEARAI_BASE_URL,
+      ),
+    );
     return { models };
   }
 
   protected resolveDefaultModel(): PiModel {
-    const ai = createAI({ binding: this.env.AI });
-    const modelId = this.env.DEFAULT_MODEL ?? DEFAULT_MODEL_ID;
-    return ai(modelId);
+    return {
+      provider: "nearai",
+      id: this.env.DEFAULT_MODEL ?? DEFAULT_NEARAI_MODEL.id,
+    };
   }
 
   protected createFetcher(): HttpFetcher {
@@ -182,6 +182,11 @@ export class PersonalAgent extends DurableObject<Env> {
     });
     this.registry.install(createMemoryExtension(this.memory));
     this.registry.install(createSkillsExtension());
+    this.registry.install(
+      createActivitiesExtension(this.activities, this.harness, (record) => {
+        this.sockets.broadcastActivity(record);
+      }),
+    );
     const fetcher = this.createFetcher();
     this.registry.install(
       createConnectorsExtension(
@@ -225,15 +230,15 @@ export class PersonalAgent extends DurableObject<Env> {
     });
   }
 
-  getProfile(): ProfileEntry[] {
+  getProfile(): Promise<ProfileEntry[]> {
     return this.memory.getProfile();
   }
 
-  setProfileEntry(key: string, value: string): ProfileEntry {
+  setProfileEntry(key: string, value: string): Promise<ProfileEntry> {
     return this.memory.setProfileEntry(key, value);
   }
 
-  searchMemoryNotes(query: string, limit = 10): MemoryNote[] {
+  searchMemoryNotes(query: string, limit = 10): Promise<MemoryNote[]> {
     return this.memory.searchNotes(query, limit);
   }
 
@@ -241,7 +246,7 @@ export class PersonalAgent extends DurableObject<Env> {
     content: string,
     category = "general",
     date?: string,
-  ): MemoryNote {
+  ): Promise<MemoryNote> {
     return this.memory.addNote(content, category, date);
   }
 
@@ -250,8 +255,13 @@ export class PersonalAgent extends DurableObject<Env> {
     accessToken: string,
     refreshToken?: string,
     expiresAt?: number,
-  ): void {
-    this.connectors.setToken(provider, accessToken, refreshToken, expiresAt);
+  ): Promise<void> {
+    return this.connectors.setToken(
+      provider,
+      accessToken,
+      refreshToken,
+      expiresAt,
+    );
   }
 
   async resumeTakeover(
@@ -261,126 +271,94 @@ export class PersonalAgent extends DurableObject<Env> {
     readonly takeoverId: string;
     readonly delivered: string;
   }> {
-    const record = this.browser.getTakeover(takeoverId);
+    const record = await this.browser.getTakeover(takeoverId);
     if (!record) {
-      throw new Error(`Takeover ${takeoverId} not found`);
+      throw new Error(`Unknown takeoverId: ${takeoverId}`);
     }
-    const payload =
-      note !== undefined ? { resumed: true, note } : { resumed: true };
-    const delivered = await this.harness.signal(
+    const signalResult = await this.harness.signal(
       record.taskId,
       BrowserTakeoverSignal,
       takeoverId,
-      payload,
+      { resumed: true, ...(note !== undefined ? { note } : {}) },
     );
     this.browser.markResumed(takeoverId);
     return {
       takeoverId,
-      delivered,
+      delivered: signalResult,
     };
   }
 
+  async steerActivity(
+    activityId: string,
+    instruction: string,
+  ): Promise<{
+    readonly activityId: string;
+    readonly operationId: string;
+  }> {
+    const record = await this.activities.getActivity(activityId);
+    if (!record) {
+      throw new Error(`Unknown activityId: ${activityId}`);
+    }
+    const receipt = await this.harness
+      .session(record.sessionId)
+      .submit(instruction, { whenBusy: "steer" });
+    const updated = await this.activities.updateActivity(activityId, {
+      status: "running",
+      collapsed: false,
+    });
+    if (updated) {
+      this.sockets.broadcastActivity(updated);
+    }
+    return {
+      activityId,
+      operationId: receipt.operationId,
+    };
+  }
+
+  async toggleActivity(
+    activityId: string,
+    collapsed: boolean,
+  ): Promise<{ readonly activityId: string; readonly collapsed: boolean }> {
+    const updated = await this.activities.updateActivity(activityId, {
+      collapsed,
+    });
+    if (!updated) {
+      throw new Error(`Unknown activityId: ${activityId}`);
+    }
+    this.sockets.broadcastActivity(updated);
+    return { activityId, collapsed: updated.collapsed };
+  }
+
+  async compactThread(
+    summary: string,
+  ): Promise<{ readonly ok: true; readonly noteId: number }> {
+    const note = await this.memory.addNote(summary, "compaction");
+    await this.harness.session(ROOT_SESSION).reset(summary);
+    return { ok: true, noteId: note.id };
+  }
+
   async onRequest(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    const path = url.pathname;
+    const bodyText =
+      request.method !== "GET" && request.method !== "HEAD"
+        ? await request.text()
+        : "";
 
-    if (request.method === "POST" && path.endsWith("/prompt")) {
-      const parsed = PromptBodySchema.safeParse(await request.json());
-      if (!parsed.success) {
-        return Response.json({ error: "input is required" }, { status: 400 });
-      }
-      const receipt = await this.submitPrompt(parsed.data.input, {
-        operationId: parsed.data.operationId,
-        session: parsed.data.sessionId,
-      });
-      return Response.json(receipt, { status: 202 });
-    }
-
-    if (request.method === "GET" && path.endsWith("/profile")) {
-      return Response.json({ entries: this.getProfile() });
-    }
-
-    if (request.method === "PUT" && path.endsWith("/profile")) {
-      const parsed = ProfileBodySchema.safeParse(await request.json());
-      if (!parsed.success) {
-        return Response.json(
-          { error: "key and value are required" },
-          { status: 400 },
-        );
-      }
-      return Response.json(
-        this.setProfileEntry(parsed.data.key, parsed.data.value),
-      );
-    }
-
-    if (request.method === "DELETE" && path.endsWith("/profile")) {
-      const key = url.searchParams.get("key");
-      if (!key) {
-        return Response.json({ error: "key is required" }, { status: 400 });
-      }
-      return Response.json({ deleted: this.memory.deleteProfileEntry(key) });
-    }
-
-    const connectorMatch = path.match(/\/connectors\/([^/]+)$/);
-    if (request.method === "PUT" && connectorMatch?.[1]) {
-      const provider = parseConnectorProvider(connectorMatch[1]);
-      if (!provider) {
-        return Response.json({ error: "Unknown provider" }, { status: 400 });
-      }
-      const parsed = ConnectorBodySchema.safeParse(await request.json());
-      if (!parsed.success) {
-        return Response.json(
-          { error: "accessToken is required" },
-          { status: 400 },
-        );
-      }
-      this.setConnectorToken(
-        provider,
-        parsed.data.accessToken,
-        parsed.data.refreshToken,
-        parsed.data.expiresAt,
-      );
-      return Response.json({ ok: true });
-    }
-
-    if (request.method === "GET" && path.endsWith("/notes")) {
-      const query = url.searchParams.get("q") ?? "";
-      return Response.json({ notes: this.searchMemoryNotes(query) });
-    }
-
-    if (request.method === "POST" && path.endsWith("/notes")) {
-      const parsed = NoteBodySchema.safeParse(await request.json());
-      if (!parsed.success) {
-        return Response.json({ error: "content is required" }, { status: 400 });
-      }
-      return Response.json(
-        this.writeMemoryNote(
-          parsed.data.content,
-          parsed.data.category,
-          parsed.data.date,
-        ),
-        { status: 201 },
-      );
-    }
-
-    const takeoverMatch = path.match(/\/takeovers\/([^/]+)\/resume$/);
-    if (request.method === "POST" && takeoverMatch?.[1]) {
-      const parsed = ResumeTakeoverBodySchema.safeParse(
-        await request.json().catch(() => ({})),
-      );
-      const note = parsed.success ? parsed.data.note : undefined;
-      try {
-        const result = await this.resumeTakeover(takeoverMatch[1], note);
-        return Response.json(result);
-      } catch (thrown) {
-        return Response.json(
-          { error: thrown instanceof Error ? thrown.message : String(thrown) },
-          { status: 404 },
-        );
-      }
-    }
-
-    return Response.json({ error: "Not found" }, { status: 404 });
+    return handleAgentHttpRequest(request, bodyText, {
+      listActivities: () => this.activities.listActivities(),
+      steerActivity: (activityId, instruction) =>
+        this.steerActivity(activityId, instruction),
+      compactThread: (summary) => this.compactThread(summary),
+      submitPrompt: (input, options) => this.submitPrompt(input, options),
+      getProfile: () => this.getProfile(),
+      setProfileEntry: (key, value) => this.setProfileEntry(key, value),
+      setConnectorToken: (provider, accessToken, refreshToken, expiresAt) =>
+        this.setConnectorToken(provider, accessToken, refreshToken, expiresAt),
+      searchMemoryNotes: (query) => this.searchMemoryNotes(query),
+      writeMemoryNote: (content, category, date) =>
+        this.writeMemoryNote(content, category, date),
+      resumeTakeover: (takeoverId, note) =>
+        this.resumeTakeover(takeoverId, note),
+    });
   }
 }
 
@@ -396,20 +374,52 @@ export default {
       return withCors(Response.json({ ok: true }));
     }
 
-    if (!isAuthorized(request, env)) {
+    if (url.pathname === "/auth/config") {
+      const enabled = Boolean(env.CF_ACCESS_TEAM_DOMAIN && env.CF_ACCESS_AUD);
+      return withCors(
+        Response.json({
+          provider: enabled ? "cloudflare_access_oauth" : "none",
+          teamDomain: env.CF_ACCESS_TEAM_DOMAIN ?? null,
+          aud: env.CF_ACCESS_AUD ?? null,
+          clientId: env.CF_ACCESS_OAUTH_CLIENT_ID ?? null,
+        }),
+      );
+    }
+
+    const identity = await verifyCloudflareAccessJwt(request, {
+      teamDomain: env.CF_ACCESS_TEAM_DOMAIN,
+      aud: env.CF_ACCESS_AUD,
+      jwksJson: env.CF_ACCESS_JWKS_JSON,
+    });
+
+    const isDevAuthed = !identity && hasLocalDevBearerAuth(request, env);
+
+    if (!identity && !isDevAuthed) {
       return withCors(
         Response.json({ error: "Unauthorized" }, { status: 401 }),
       );
     }
 
-    const agentMatch = url.pathname.match(/^\/api\/agents\/([^/]+)(\/.*)?$/);
-    if (agentMatch?.[1]) {
-      const agentId = decodeURIComponent(agentMatch[1]);
+    const meMatch = url.pathname.match(/^\/api\/me(\/.*)?$/);
+    if (meMatch) {
+      const agentId = identity?.sub ?? "personal";
       const stub = env.PersonalAgent.getByName(agentId);
       const response = await stub.fetch(request);
       return withCors(response);
     }
 
-    return withCors(Response.json({ error: "Not found" }, { status: 404 }));
+    const agentMatch = url.pathname.match(/^\/api\/agents\/([^/]+)(\/.*)?$/);
+    if (!agentMatch?.[1]) {
+      return withCors(Response.json({ error: "Not found" }, { status: 404 }));
+    }
+
+    const requestedId = decodeURIComponent(agentMatch[1]);
+    if (identity && requestedId !== identity.sub) {
+      return withCors(Response.json({ error: "Forbidden" }, { status: 403 }));
+    }
+
+    const stub = env.PersonalAgent.getByName(requestedId);
+    const response = await stub.fetch(request);
+    return withCors(response);
   },
 };

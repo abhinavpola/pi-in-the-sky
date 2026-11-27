@@ -2,6 +2,7 @@ import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { verifyCloudflareAccessJwt } from "../src/access-auth";
 import type { TestPersonalAgent } from "./worker";
 
 const AUTH_HEADERS = {
@@ -16,6 +17,15 @@ const SocketMessageSchema = z
       .object({
         id: z.string(),
         liveViewUrl: z.string().nullable(),
+      })
+      .optional(),
+    activity: z
+      .object({
+        id: z.string(),
+        title: z.string(),
+        status: z.string(),
+        collapsed: z.boolean(),
+        summary: z.string(),
       })
       .optional(),
   })
@@ -42,6 +52,35 @@ const TakeoverResumeResponseSchema = z.object({
 
 function stubFor(id: string): DurableObjectStub<TestPersonalAgent> {
   return env.PersonalAgent.getByName(id);
+}
+
+function toBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+async function signAccessJwt(
+  privateKey: CryptoKey,
+  kid: string,
+  payload: Record<string, unknown>,
+): Promise<string> {
+  const encoder = new TextEncoder();
+  const headerSeg = toBase64Url(
+    encoder.encode(JSON.stringify({ alg: "RS256", typ: "JWT", kid })),
+  );
+  const payloadSeg = toBase64Url(encoder.encode(JSON.stringify(payload)));
+  const sigBuf = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    privateKey,
+    encoder.encode(`${headerSeg}.${payloadSeg}`),
+  );
+  return `${headerSeg}.${payloadSeg}.${toBase64Url(new Uint8Array(sigBuf))}`;
 }
 
 function nextSocketMessage(
@@ -80,40 +119,139 @@ function nextSocketMessage(
 }
 
 describe("cfw-agent workerd integration", () => {
-  it("enforces bearer auth and exposes health endpoint", async () => {
+  it("enforces fail-closed auth, /auth/config discovery, /api/me routing, and Cloudflare Access RS256 JWT verification", async () => {
     const health = await SELF.fetch("https://agent.test/health");
     expect(health.status).toBe(200);
     expect(HealthResponseSchema.parse(await health.json())).toEqual({
       ok: true,
     });
 
-    const unauthorized = await SELF.fetch(
-      "https://agent.test/api/agents/auth-check/profile",
-    );
+    const authConfig = await SELF.fetch("https://agent.test/auth/config");
+    expect(authConfig.status).toBe(200);
+
+    const unauthorized = await SELF.fetch("https://agent.test/api/me/profile");
     expect(unauthorized.status).toBe(401);
 
-    const authorized = await SELF.fetch(
-      "https://agent.test/api/agents/auth-check/profile",
-      { headers: AUTH_HEADERS },
-    );
-    expect(authorized.status).toBe(200);
-    expect(ProfileResponseSchema.parse(await authorized.json())).toEqual({
+    const meAuthorized = await SELF.fetch("https://agent.test/api/me/profile", {
+      headers: AUTH_HEADERS,
+    });
+    expect(meAuthorized.status).toBe(200);
+    expect(ProfileResponseSchema.parse(await meAuthorized.json())).toEqual({
       entries: [],
     });
+
+    const keyPair = await crypto.subtle.generateKey(
+      {
+        name: "RSASSA-PKCS1-v1_5",
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: "SHA-256",
+      },
+      true,
+      ["sign", "verify"],
+    );
+    if (!("publicKey" in keyPair && "privateKey" in keyPair)) {
+      throw new Error("Expected RSA CryptoKeyPair");
+    }
+    const exportedJwk = await crypto.subtle.exportKey("jwk", keyPair.publicKey);
+    const jwksJson = JSON.stringify({
+      keys: [{ ...exportedJwk, kid: "cf-access-key-1" }],
+    });
+    const accessConfig = {
+      teamDomain: "abhinav.cloudflareaccess.com",
+      aud: "aud-tag-123",
+      jwksJson,
+    };
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const validJwt = await signAccessJwt(
+      keyPair.privateKey,
+      "cf-access-key-1",
+      {
+        sub: "user-abhinav-1",
+        email: "abhinav@example.com",
+        aud: ["aud-tag-123"],
+        iss: "https://abhinav.cloudflareaccess.com",
+        exp: nowSec + 300,
+      },
+    );
+
+    const verified = await verifyCloudflareAccessJwt(
+      new Request("https://agent.test/api/me/profile", {
+        headers: { "Cf-Access-Jwt-Assertion": validJwt },
+      }),
+      accessConfig,
+    );
+    expect(verified).toEqual({
+      sub: "user-abhinav-1",
+      email: "abhinav@example.com",
+    });
+
+    const wrongAudJwt = await signAccessJwt(
+      keyPair.privateKey,
+      "cf-access-key-1",
+      {
+        sub: "user-abhinav-1",
+        aud: ["other-aud"],
+        iss: "https://abhinav.cloudflareaccess.com",
+        exp: nowSec + 300,
+      },
+    );
+    expect(
+      await verifyCloudflareAccessJwt(
+        new Request("https://agent.test/api/me/profile", {
+          headers: { Authorization: `Bearer ${wrongAudJwt}` },
+        }),
+        accessConfig,
+      ),
+    ).toBeNull();
+
+    const expiredJwt = await signAccessJwt(
+      keyPair.privateKey,
+      "cf-access-key-1",
+      {
+        sub: "user-abhinav-1",
+        aud: ["aud-tag-123"],
+        iss: "https://abhinav.cloudflareaccess.com",
+        exp: nowSec - 60,
+      },
+    );
+    expect(
+      await verifyCloudflareAccessJwt(
+        new Request("https://agent.test/api/me/profile", {
+          headers: { Authorization: `Bearer ${expiredJwt}` },
+        }),
+        accessConfig,
+      ),
+    ).toBeNull();
   });
 
-  it("plans a repeat trip using memory, skills, Gmail, Calendar, browser, and FTS5 notes", async () => {
+  it("plans a repeat trip with zero plaintext prompts, completions, notes, or tokens in SQLite", async () => {
     const agentId = "trip-planner-e2e";
+    const secretHomeAirport = "SFO-PRIVATE-AIRPORT-991";
+    const secretOauthToken = "ya29.super-secret-oauth-token-xyz";
+    const secretPromptPhrase = "SECRET_TOKYO_PROMPT_CANARY_42";
+    const secretReplyPhrase = "SECRET_ANA_NH7_COMPLETION_CANARY_88";
 
     const putProfile = await SELF.fetch(
       `https://agent.test/api/agents/${agentId}/profile`,
       {
         method: "PUT",
         headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
-        body: JSON.stringify({ key: "home_airport", value: "SFO" }),
+        body: JSON.stringify({ key: "home_airport", value: secretHomeAirport }),
       },
     );
     expect(putProfile.status).toBe(200);
+
+    const putToken = await SELF.fetch(
+      `https://agent.test/api/agents/${agentId}/connectors/gmail/token`,
+      {
+        method: "PUT",
+        headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
+        body: JSON.stringify({ accessToken: secretOauthToken }),
+      },
+    );
+    expect(putToken.status).toBe(200);
 
     const stub = stubFor(agentId);
     await stub.setScript(agentId, [
@@ -184,7 +322,7 @@ describe("cfw-agent workerd integration", () => {
         ],
       },
       {
-        text: "Found ANA NH7 nonstop SFO -> NRT for Oct 12-20, 2026 ($1,120). Want me to go ahead and book it?",
+        text: `${secretReplyPhrase} Found ANA NH7 nonstop SFO -> NRT for Oct 12-20, 2026 ($1,120). Want me to book it?`,
       },
     ]);
 
@@ -216,7 +354,7 @@ describe("cfw-agent workerd integration", () => {
         type: "submit",
         id: "cmd-submit-1",
         operationId: promptOpId,
-        input: "Look up my Tokyo trip from last year and plan the same trip.",
+        input: `${secretPromptPhrase} Look up my Tokyo trip from last year and plan the same trip.`,
       }),
     );
 
@@ -228,7 +366,7 @@ describe("cfw-agent workerd integration", () => {
 
     await nextSocketMessage(
       ws,
-      (m) => m.type === "ops" && JSON.stringify(m).includes("ANA NH7"),
+      (m) => m.type === "ops" && JSON.stringify(m).includes(secretReplyPhrase),
       "final assistant message",
       10_000,
     );
@@ -242,19 +380,12 @@ describe("cfw-agent workerd integration", () => {
     expect(searchJson.notes.length).toBeGreaterThanOrEqual(1);
     expect(searchJson.notes[0]?.content).toContain("ANA NH7");
 
-    ws.send(
-      JSON.stringify({
-        type: "submit",
-        id: "cmd-submit-dup",
-        operationId: promptOpId,
-        input: "Look up my Tokyo trip from last year and plan the same trip.",
-      }),
-    );
-    const dupResult = await nextSocketMessage(
-      ws,
-      (m) => m.type === "result" && m.id === "cmd-submit-dup",
-    );
-    expect(dupResult.type).toBe("result");
+    const rawSqlite = await stub.dumpRawSqliteText();
+    expect(rawSqlite).not.toContain(secretHomeAirport);
+    expect(rawSqlite).not.toContain(secretOauthToken);
+    expect(rawSqlite).not.toContain(secretPromptPhrase);
+    expect(rawSqlite).not.toContain(secretReplyPhrase);
+    expect(rawSqlite).not.toContain("Planned Tokyo Oct 12-20 2026");
 
     ws.close();
   });

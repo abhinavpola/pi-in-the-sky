@@ -2,15 +2,16 @@ import { useEffect, useMemo, useState } from "react";
 import { Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
 
 import { AgentClient } from "./agent-client";
-import { ChatPane } from "./components/ChatPane";
 import { MemoryPane } from "./components/MemoryPane";
 import { SettingsPane } from "./components/SettingsPane";
+import { StreamView } from "./components/StreamView";
 import type {
+  ActivityItem,
   ChatMessage,
   ConnectionConfig,
   ConnectionState,
-  TabId,
   TakeoverItem,
+  ViewMode,
 } from "./types";
 
 const DEFAULT_CONFIG: ConnectionConfig = {
@@ -19,18 +20,14 @@ const DEFAULT_CONFIG: ConnectionConfig = {
   authToken: "",
 };
 
-const TABS: readonly { readonly id: TabId; readonly label: string }[] = [
-  { id: "chat", label: "Chat" },
-  { id: "memory", label: "Memory" },
-  { id: "settings", label: "Settings" },
-];
-
 export function App() {
-  const [activeTab, setActiveTab] = useState<TabId>("chat");
+  const [viewMode, setViewMode] = useState<ViewMode>("stream");
+  const [showDrawer, setShowDrawer] = useState(false);
   const [config, setConfig] = useState<ConnectionConfig>(DEFAULT_CONFIG);
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("disconnected");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [activities, setActivities] = useState<ActivityItem[]>([]);
   const [activeTakeovers, setActiveTakeovers] = useState<TakeoverItem[]>([]);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
@@ -39,6 +36,7 @@ export function App() {
       new AgentClient(DEFAULT_CONFIG, {
         onConnectionChange: setConnectionState,
         onMessagesChange: setMessages,
+        onActivitiesChange: setActivities,
         onTakeoverRequested: (takeover) => {
           setActiveTakeovers((prev) => [
             ...prev.filter((item) => item.id !== takeover.id),
@@ -65,17 +63,40 @@ export function App() {
     setActiveTakeovers((prev) => prev.filter((item) => item.id !== id));
   };
 
-  const renderPane = (tab: TabId) => {
-    switch (tab) {
-      case "chat":
+  const handleCompact = () => {
+    const recent = messages
+      .slice(-6)
+      .map((item) => `${item.role}: ${item.text}`)
+      .join(" | ");
+    const summary = recent || "Compacted stream checkpoint.";
+    client.compactThread(summary);
+  };
+
+  const runningCount = activities.filter(
+    (item) => item.status === "running" || item.status === "waiting_input",
+  ).length;
+
+  const renderContent = (mode: ViewMode) => {
+    switch (mode) {
+      case "stream":
         return (
-          <ChatPane
+          <StreamView
             messages={messages}
+            activities={activities}
             activeTakeovers={activeTakeovers}
+            showDrawer={showDrawer}
             onSend={(text) => {
               setErrorBanner(null);
               return client.submitPrompt(text);
             }}
+            onSteerActivity={(activityId, instruction) => {
+              setErrorBanner(null);
+              return client.steerActivity(activityId, instruction);
+            }}
+            onToggleActivity={(activityId, collapsed) => {
+              client.toggleActivity(activityId, collapsed);
+            }}
+            onCompact={handleCompact}
             onAbort={() => client.abort()}
             onResumeTakeover={handleResumeTakeover}
           />
@@ -91,11 +112,12 @@ export function App() {
               setConfig(next);
               setErrorBanner(null);
               client.updateConfig(next);
+              setViewMode("stream");
             }}
           />
         );
       default: {
-        tab satisfies never;
+        mode satisfies never;
         return null;
       }
     }
@@ -103,46 +125,79 @@ export function App() {
 
   return (
     <SafeAreaView style={styles.root}>
-      <View style={styles.sidebar}>
-        <Text style={styles.title}>Pi in the Sky</Text>
-        <Text style={styles.badge}>{connectionState}</Text>
-        {TABS.map((tab) => (
-          <Pressable
-            key={tab.id}
-            style={[styles.navItem, activeTab === tab.id && styles.navActive]}
-            onPress={() => setActiveTab(tab.id)}
-          >
-            <Text style={styles.navText}>{tab.label}</Text>
+      <View style={styles.header}>
+        <View style={styles.headerLeft}>
+          <Pressable onPress={() => setViewMode("stream")}>
+            <Text style={styles.title}>Pi in the Sky</Text>
           </Pressable>
-        ))}
+          <Text style={styles.badge}>{connectionState}</Text>
+        </View>
+        <View style={styles.headerActions}>
+          <Pressable
+            style={[styles.pill, showDrawer && styles.pillActive]}
+            onPress={() => {
+              setViewMode("stream");
+              setShowDrawer((prev) => !prev);
+            }}
+          >
+            <Text style={styles.pillText}>
+              Activity{runningCount > 0 ? ` (${runningCount})` : ""}
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[styles.pill, viewMode === "memory" && styles.pillActive]}
+            onPress={() =>
+              setViewMode((prev) => (prev === "memory" ? "stream" : "memory"))
+            }
+          >
+            <Text style={styles.pillText}>Memory</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.pill, viewMode === "settings" && styles.pillActive]}
+            onPress={() =>
+              setViewMode((prev) =>
+                prev === "settings" ? "stream" : "settings",
+              )
+            }
+          >
+            <Text style={styles.pillText}>Settings</Text>
+          </Pressable>
+        </View>
       </View>
-      <View style={styles.main}>
-        {errorBanner ? (
-          <View style={styles.errorBar}>
-            <Text style={styles.errorText}>{errorBanner}</Text>
-          </View>
-        ) : null}
-        {renderPane(activeTab)}
-      </View>
+      {errorBanner ? (
+        <View style={styles.errorBar}>
+          <Text style={styles.errorText}>{errorBanner}</Text>
+        </View>
+      ) : null}
+      <View style={styles.main}>{renderContent(viewMode)}</View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, flexDirection: "row", backgroundColor: "#0b1120" },
-  sidebar: {
-    width: 200,
+  root: { flex: 1, backgroundColor: "#0b1120" },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "#1e293b",
     backgroundColor: "#0b1120",
-    borderRightWidth: 1,
-    borderRightColor: "#1e293b",
-    padding: 16,
-    gap: 8,
   },
-  title: { color: "#f8fafc", fontSize: 16, fontWeight: "700" },
-  badge: { color: "#93c5fd", fontSize: 12, marginBottom: 12 },
-  navItem: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8 },
-  navActive: { backgroundColor: "#1e293b" },
-  navText: { color: "#f8fafc", fontSize: 14, fontWeight: "500" },
+  headerLeft: { flexDirection: "row", alignItems: "center", gap: 10 },
+  headerActions: { flexDirection: "row", gap: 8 },
+  title: { color: "#f8fafc", fontSize: 15, fontWeight: "700" },
+  badge: { color: "#93c5fd", fontSize: 12 },
+  pill: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: "#1e293b",
+  },
+  pillActive: { backgroundColor: "#1d4ed8" },
+  pillText: { color: "#f8fafc", fontSize: 12, fontWeight: "600" },
   main: { flex: 1 },
   errorBar: { backgroundColor: "#7f1d1d", padding: 8 },
   errorText: { color: "#fecaca", fontSize: 12 },

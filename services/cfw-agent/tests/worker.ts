@@ -19,6 +19,22 @@ export class TestPersonalAgent extends PersonalAgent {
     scriptedQueues.set(key, [...turns]);
   }
 
+  dumpRawSqliteText(): string {
+    const tables = this.ctx.storage.sql
+      .exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'",
+      )
+      .toArray();
+    const chunks: string[] = [];
+    for (const table of tables) {
+      const rows = this.ctx.storage.sql
+        .exec(`SELECT * FROM "${table.name}"`)
+        .toArray();
+      chunks.push(`${table.name}:${JSON.stringify(rows)}`);
+    }
+    return chunks.join("\n");
+  }
+
   protected override createModelRegistry(): { models: MutableModels } {
     const models = createModels();
     models.setProvider(

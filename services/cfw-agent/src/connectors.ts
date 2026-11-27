@@ -1,12 +1,13 @@
 import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
-import { int, obj, opt, str } from "@earendil-works/pi-schema";
-import { err } from "@pi-in-the-sky/result-monad";
+import { num, obj, opt, str } from "@earendil-works/pi-schema";
+import { z } from "zod";
 
 import {
   fetchJsonWithBearer,
   type HttpFetcher,
   toToolResult,
 } from "./http-tool";
+import type { VaultCipher } from "./vault";
 
 export type ConnectorProvider = "gmail" | "google_calendar";
 
@@ -17,62 +18,86 @@ type ConnectorConfig = {
   readonly calendarApiBaseUrl?: string;
 };
 
+type TokenRow = {
+  provider: string;
+  payload_enc: string;
+  updated_at: number;
+};
+
+const StoredTokenPayloadSchema = z.object({
+  accessToken: z.string().min(1),
+  refreshToken: z.string().nullable(),
+  expiresAt: z.number().nullable(),
+});
+
 export class ConnectorStore {
   readonly #sql: SqlStorage;
+  readonly #vault: VaultCipher;
 
-  constructor(sql: SqlStorage) {
+  constructor(sql: SqlStorage, vault: VaultCipher) {
     this.#sql = sql;
-    this.#migrate();
-  }
-
-  #migrate(): void {
+    this.#vault = vault;
     this.#sql.exec(`
-      CREATE TABLE IF NOT EXISTS connector_tokens (
+      CREATE TABLE IF NOT EXISTS connector_tokens_vault (
         provider TEXT PRIMARY KEY,
-        access_token TEXT NOT NULL,
-        refresh_token TEXT,
-        expires_at INTEGER,
+        payload_enc TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
     `);
   }
 
-  setToken(
+  async setToken(
     provider: ConnectorProvider,
     accessToken: string,
     refreshToken?: string,
     expiresAt?: number,
-  ): void {
+  ): Promise<void> {
+    const payload = JSON.stringify({
+      accessToken,
+      refreshToken: refreshToken ?? null,
+      expiresAt: expiresAt ?? null,
+    });
+    const encrypted = await this.#vault.encryptText(
+      payload,
+      `connector_tokens:${provider}`,
+    );
     this.#sql.exec(
-      `INSERT INTO connector_tokens (provider, access_token, refresh_token, expires_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO connector_tokens_vault (provider, payload_enc, updated_at)
+       VALUES (?, ?, ?)
        ON CONFLICT(provider) DO UPDATE SET
-         access_token = excluded.access_token,
-         refresh_token = excluded.refresh_token,
-         expires_at = excluded.expires_at,
+         payload_enc = excluded.payload_enc,
          updated_at = excluded.updated_at`,
       provider,
-      accessToken,
-      refreshToken ?? null,
-      expiresAt ?? null,
+      encrypted,
       Date.now(),
     );
   }
 
-  getAccessToken(provider: ConnectorProvider): string | undefined {
+  async getAccessToken(
+    provider: ConnectorProvider,
+  ): Promise<string | undefined> {
     const rows = this.#sql
-      .exec<{ access_token: string }>(
-        "SELECT access_token FROM connector_tokens WHERE provider = ?",
+      .exec<TokenRow>(
+        "SELECT provider, payload_enc, updated_at FROM connector_tokens_vault WHERE provider = ?",
         provider,
       )
       .toArray();
-    return rows[0]?.access_token;
+    const row = rows[0];
+    if (!row) {
+      return undefined;
+    }
+    const decrypted = await this.#vault.decryptText(
+      row.payload_enc,
+      `connector_tokens:${provider}`,
+    );
+    const parsed = StoredTokenPayloadSchema.parse(JSON.parse(decrypted));
+    return parsed.accessToken;
   }
 }
 
 const GmailSearchSchema = obj({
   query: str(),
-  maxResults: opt(int()),
+  maxResults: opt(num()),
 });
 
 const GmailGetMessageSchema = obj({
@@ -88,20 +113,20 @@ const GmailCreateDraftSchema = obj({
 const CalendarListEventsSchema = obj({
   timeMin: str(),
   timeMax: str(),
-  calendarId: opt(str()),
+  maxResults: opt(num()),
   pageToken: opt(str()),
 });
 
-function encodeBase64UrlUtf8(input: string): string {
+function encodeBase64Url(input: string): string {
   const bytes = new TextEncoder().encode(input);
   let binary = "";
   for (const byte of bytes) {
     binary += String.fromCharCode(byte);
   }
   return btoa(binary)
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replaceAll("=", "");
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 }
 
 export function createConnectorsExtension(
@@ -109,8 +134,10 @@ export function createConnectorsExtension(
   getConfig: () => ConnectorConfig,
   fetcher: HttpFetcher = (input, init) => fetch(input, init),
 ): Extension {
-  const resolveToken = (provider: ConnectorProvider): string | undefined => {
-    const stored = store.getAccessToken(provider);
+  const resolveToken = async (
+    provider: ConnectorProvider,
+  ): Promise<string | undefined> => {
+    const stored = await store.getAccessToken(provider);
     if (stored) {
       return stored;
     }
@@ -127,22 +154,6 @@ export function createConnectorsExtension(
     }
   };
 
-  const requestApi = async (
-    provider: ConnectorProvider,
-    url: string,
-    init?: RequestInit,
-  ) => {
-    const token = resolveToken(provider);
-    if (!token) {
-      return toToolResult(
-        err("Connector is not authenticated. Configure an OAuth token first."),
-      );
-    }
-    return toToolResult(
-      await fetchJsonWithBearer(url, fetcher, { token, init }),
-    );
-  };
-
   const gmailBase = () =>
     (
       getConfig().gmailApiBaseUrl ?? "https://gmail.googleapis.com/gmail/v1"
@@ -155,52 +166,95 @@ export function createConnectorsExtension(
 
   const gmailSearchTool: ToolRegistration<typeof GmailSearchSchema> = {
     name: "gmail_search",
-    description: "Search Gmail messages matching a Gmail query string.",
+    description:
+      "Search the user's Gmail messages using Gmail search syntax (e.g. 'Tokyo flight confirmation').",
     parameters: GmailSearchSchema,
     replay: "safe",
-    execute: ({ query, maxResults }) => {
+    async execute({ query, maxResults }) {
+      const token = await resolveToken("gmail");
+      if (!token) {
+        return {
+          isError: true,
+          output: [
+            { type: "text", text: "Gmail connector is not authorized." },
+          ],
+        };
+      }
       const params = new URLSearchParams({
         q: query,
-        maxResults: String(Math.max(1, Math.min(maxResults ?? 10, 50))),
+        maxResults: String(Math.max(1, Math.min(maxResults ?? 10, 25))),
       });
-      return requestApi(
-        "gmail",
+      const result = await fetchJsonWithBearer(
         `${gmailBase()}/users/me/messages?${params.toString()}`,
+        fetcher,
+        { token },
       );
+      return toToolResult(result);
     },
   };
 
   const gmailGetMessageTool: ToolRegistration<typeof GmailGetMessageSchema> = {
     name: "gmail_get_message",
-    description: "Fetch the full contents of a Gmail message by message ID.",
+    description: "Fetch a full Gmail message by messageId.",
     parameters: GmailGetMessageSchema,
     replay: "safe",
-    execute: ({ messageId }) =>
-      requestApi(
-        "gmail",
+    async execute({ messageId }) {
+      const token = await resolveToken("gmail");
+      if (!token) {
+        return {
+          isError: true,
+          output: [
+            { type: "text", text: "Gmail connector is not authorized." },
+          ],
+        };
+      }
+      const result = await fetchJsonWithBearer(
         `${gmailBase()}/users/me/messages/${encodeURIComponent(messageId)}`,
-      ),
+        fetcher,
+        { token },
+      );
+      return toToolResult(result);
+    },
   };
 
   const gmailCreateDraftTool: ToolRegistration<typeof GmailCreateDraftSchema> =
     {
       name: "gmail_create_draft",
-      description: "Create a Gmail draft without sending it.",
+      description:
+        "Create a Gmail draft (does not send; ask the user before sending).",
       parameters: GmailCreateDraftSchema,
       replay: "unsafe",
-      execute: ({ to, subject, body }) => {
+      async execute({ to, subject, body }) {
+        const token = await resolveToken("gmail");
+        if (!token) {
+          return {
+            isError: true,
+            output: [
+              { type: "text", text: "Gmail connector is not authorized." },
+            ],
+          };
+        }
         const rawMime = [
           `To: ${to}`,
           `Subject: ${subject}`,
-          'Content-Type: text/plain; charset="UTF-8"',
+          "Content-Type: text/plain; charset=UTF-8",
           "",
           body,
         ].join("\r\n");
-        const raw = encodeBase64UrlUtf8(rawMime);
-        return requestApi("gmail", `${gmailBase()}/users/me/drafts`, {
-          method: "POST",
-          body: JSON.stringify({ message: { raw } }),
-        });
+        const result = await fetchJsonWithBearer(
+          `${gmailBase()}/users/me/drafts`,
+          fetcher,
+          {
+            token,
+            init: {
+              method: "POST",
+              body: JSON.stringify({
+                message: { raw: encodeBase64Url(rawMime) },
+              }),
+            },
+          },
+        );
+        return toToolResult(result);
       },
     };
 
@@ -209,24 +263,38 @@ export function createConnectorsExtension(
   > = {
     name: "calendar_list_events",
     description:
-      "List Google Calendar events within an ISO-8601 time range. Pass pageToken from nextPageToken to fetch subsequent pages.",
+      "List Google Calendar events in an ISO-8601 time range [timeMin, timeMax].",
     parameters: CalendarListEventsSchema,
     replay: "safe",
-    execute: ({ timeMin, timeMax, calendarId, pageToken }) => {
-      const id = encodeURIComponent(calendarId ?? "primary");
+    async execute({ timeMin, timeMax, maxResults, pageToken }) {
+      const token = await resolveToken("google_calendar");
+      if (!token) {
+        return {
+          isError: true,
+          output: [
+            {
+              type: "text",
+              text: "Google Calendar connector is not authorized.",
+            },
+          ],
+        };
+      }
       const params = new URLSearchParams({
         timeMin,
         timeMax,
         singleEvents: "true",
         orderBy: "startTime",
+        maxResults: String(Math.max(1, Math.min(maxResults ?? 25, 100))),
       });
       if (pageToken) {
         params.set("pageToken", pageToken);
       }
-      return requestApi(
-        "google_calendar",
-        `${calendarBase()}/calendars/${id}/events?${params.toString()}`,
+      const result = await fetchJsonWithBearer(
+        `${calendarBase()}/calendars/primary/events?${params.toString()}`,
+        fetcher,
+        { token },
       );
+      return toToolResult(result);
     },
   };
 

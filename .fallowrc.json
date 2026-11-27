@@ -1,11 +1,7 @@
 {
-  "entry": [
-    "lint/*.js",
-    "services/cfw-agent/tests/worker.ts",
-    "projects/macos/metro.config.js"
-  ],
+  "entry": ["lint/*.js", "projects/macos/metro.config.js"],
   "ignoreDependencies": ["react-native-macos"],
   "rules": {
-    "unused-class-members": "off"
+    "private-type-leak": "off"
   }
 }

@@ -1,7 +1,6 @@
 import { err, ok, type Result } from "@pi-in-the-sky/result-monad";
 
 import type {
-  ApprovalItem,
   ChatMessage,
   ConnectionConfig,
   ConnectionState,
@@ -15,11 +14,147 @@ import type {
 type ClientHandlers = {
   readonly onConnectionChange: (state: ConnectionState) => void;
   readonly onMessagesChange: (messages: ChatMessage[]) => void;
-  readonly onApprovalRequested: (approval: ApprovalItem) => void;
   readonly onTakeoverRequested: (takeover: TakeoverItem) => void;
   readonly onReset: () => void;
   readonly onError: (message: string) => void;
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function readString(
+  record: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = record[key];
+  return typeof value === "string" ? value : null;
+}
+
+function readNumber(
+  record: Record<string, unknown>,
+  key: string,
+): number | null {
+  const value = record[key];
+  return typeof value === "number" ? value : null;
+}
+
+function extractTextContent(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  const parts: string[] = [];
+  for (const item of content) {
+    if (
+      isRecord(item) &&
+      item.type === "text" &&
+      typeof item.text === "string"
+    ) {
+      parts.push(item.text);
+    }
+  }
+  return parts.join("\n");
+}
+
+function parseIncomingView(raw: unknown): IncomingView {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  const entries = Array.isArray(raw.entries) ? raw.entries : undefined;
+  if (!isRecord(raw.pi) || !isRecord(raw.pi.live)) {
+    return { entries };
+  }
+  const liveRaw = raw.pi.live;
+  const message = isRecord(liveRaw.message)
+    ? { content: liveRaw.message.content }
+    : undefined;
+  const error = typeof liveRaw.error === "string" ? liveRaw.error : undefined;
+  return {
+    entries,
+    pi: { live: { message, error } },
+  };
+}
+
+function parseTakeover(raw: unknown): TakeoverItem | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const id = readString(raw, "id");
+  const url = readString(raw, "url");
+  const reason = readString(raw, "reason");
+  const status = raw.status;
+  if (
+    !id ||
+    !url ||
+    !reason ||
+    (status !== "waiting" && status !== "resumed")
+  ) {
+    return null;
+  }
+  const liveViewUrl =
+    typeof raw.liveViewUrl === "string" ? raw.liveViewUrl : null;
+  return { id, url, liveViewUrl, reason, status };
+}
+
+function parseIncomingSocketMessage(
+  raw: unknown,
+): IncomingSocketMessage | null {
+  if (!isRecord(raw) || typeof raw.type !== "string") {
+    return null;
+  }
+  switch (raw.type) {
+    case "hello":
+      return { type: "hello" };
+    case "result":
+      return { type: "result" };
+    case "ops":
+      return { type: "ops" };
+    case "view":
+      return { type: "view", view: parseIncomingView(raw.view) };
+    case "takeover_requested": {
+      const takeover = parseTakeover(raw.takeover);
+      return takeover ? { type: "takeover_requested", takeover } : null;
+    }
+    case "error":
+      return {
+        type: "error",
+        message: readString(raw, "message") ?? "Unknown agent error",
+      };
+    default:
+      return null;
+  }
+}
+
+function parseProfileEntry(raw: unknown): ProfileEntry | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const key = readString(raw, "key");
+  const value = readString(raw, "value");
+  const updatedAt = readNumber(raw, "updatedAt");
+  if (!key || value === null || updatedAt === null) {
+    return null;
+  }
+  return { key, value, updatedAt };
+}
+
+function parseMemoryNote(raw: unknown): MemoryNote | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const id = readNumber(raw, "id");
+  const date = readString(raw, "date");
+  const category = readString(raw, "category");
+  const content = readString(raw, "content");
+  const createdAt = readNumber(raw, "createdAt");
+  if (id === null || !date || !category || !content || createdAt === null) {
+    return null;
+  }
+  return { id, date, category, content, createdAt };
+}
 
 function extractMessagesFromView(view: IncomingView): {
   readonly messages: ChatMessage[];
@@ -28,24 +163,25 @@ function extractMessagesFromView(view: IncomingView): {
   const entries = view.entries ?? [];
   const result: ChatMessage[] = [];
   for (const raw of entries) {
-    if (!raw || typeof raw !== "object") {
+    if (!isRecord(raw) || !Array.isArray(raw.model)) {
       continue;
     }
-    const entry = raw as { id?: number | string; model?: unknown[] };
-    const modelParts = Array.isArray(entry.model) ? entry.model : [];
-    for (const part of modelParts) {
-      if (!part || typeof part !== "object") {
+    const entryId =
+      typeof raw.id === "number" || typeof raw.id === "string"
+        ? String(raw.id)
+        : String(result.length);
+    for (const part of raw.model) {
+      if (!isRecord(part)) {
         continue;
       }
-      const record = part as { role?: string; content?: unknown };
-      if (record.role !== "user" && record.role !== "assistant") {
+      if (part.role !== "user" && part.role !== "assistant") {
         continue;
       }
-      const text = extractTextContent(record.content);
+      const text = extractTextContent(part.content);
       if (text) {
         result.push({
-          id: `${String(entry.id ?? result.length)}-${record.role}`,
-          role: record.role,
+          id: `${entryId}-${part.role}`,
+          role: part.role,
           text,
         });
       }
@@ -66,36 +202,6 @@ function extractMessagesFromView(view: IncomingView): {
       : null;
   return { messages: result, liveError };
 }
-
-function extractTextContent(content: unknown): string {
-  if (typeof content === "string") {
-    return content;
-  }
-  if (!Array.isArray(content)) {
-    return "";
-  }
-  return content
-    .map((item) => {
-      if (
-        item &&
-        typeof item === "object" &&
-        "type" in item &&
-        (item as { type: unknown }).type === "text" &&
-        "text" in item
-      ) {
-        return String((item as { text: unknown }).text);
-      }
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
-type ReactNativeWebSocketConstructor = new (
-  url: string,
-  protocols?: string | string[] | null,
-  options?: { readonly headers?: Record<string, string> },
-) => WebSocket;
 
 const BASE_URL_PATTERN =
   /^(https?):\/\/(\[[^\]]+\]|[^/:?#]+)(?::\d+)?(\/.*)?$/i;
@@ -135,6 +241,7 @@ function makeWsUrl(config: ConnectionConfig): string {
 async function requestJson<T>(
   config: ConnectionConfig,
   path: string,
+  parse: (data: unknown) => T | null,
   init?: RequestInit,
 ): Promise<Result<T, string>> {
   const validated = validateBaseUrl(config.baseUrl);
@@ -160,7 +267,12 @@ async function requestJson<T>(
     if (!response.ok) {
       return err(`HTTP ${response.status}: ${text}`);
     }
-    return ok((text ? JSON.parse(text) : {}) as T);
+    const raw: unknown = text ? JSON.parse(text) : {};
+    const parsed = parse(raw);
+    if (parsed === null) {
+      return err("Unexpected response shape from agent.");
+    }
+    return ok(parsed);
   } catch (thrown) {
     return err(thrown instanceof Error ? thrown.message : String(thrown));
   }
@@ -195,15 +307,11 @@ export class AgentClient {
       return;
     }
     this.#handlers.onConnectionChange("connecting");
-    const WebSocketWithHeaders =
-      WebSocket as unknown as ReactNativeWebSocketConstructor;
     const headers: Record<string, string> = {};
     if (this.#config.authToken) {
       headers.Authorization = `Bearer ${this.#config.authToken}`;
     }
-    const socket = new WebSocketWithHeaders(makeWsUrl(this.#config), null, {
-      headers,
-    });
+    const socket = new WebSocket(makeWsUrl(this.#config), null, { headers });
     this.#socket = socket;
 
     socket.onopen = () => {
@@ -213,8 +321,12 @@ export class AgentClient {
 
     socket.onmessage = (event) => {
       try {
-        const message = JSON.parse(String(event.data)) as IncomingSocketMessage;
-        this.#handleIncoming(message);
+        const parsed = parseIncomingSocketMessage(
+          JSON.parse(String(event.data)),
+        );
+        if (parsed) {
+          this.#handleIncoming(parsed);
+        }
       } catch {
         this.#handlers.onError("Received invalid JSON from agent.");
       }
@@ -267,16 +379,6 @@ export class AgentClient {
     this.#send({ type: "abort", id: this.#nextId("abort") });
   }
 
-  resolveApproval(approvalId: string, approved: boolean, note?: string): void {
-    this.#send({
-      type: "resolve_approval",
-      id: this.#nextId("approval"),
-      approvalId,
-      approved,
-      note,
-    });
-  }
-
   resumeTakeover(takeoverId: string, note?: string): void {
     this.#send({
       type: "resume_takeover",
@@ -287,14 +389,22 @@ export class AgentClient {
   }
 
   getProfile(): Promise<Result<{ entries: ProfileEntry[] }, string>> {
-    return requestJson<{ entries: ProfileEntry[] }>(this.#config, "/profile");
+    return requestJson(this.#config, "/profile", (raw) => {
+      if (!isRecord(raw) || !Array.isArray(raw.entries)) {
+        return null;
+      }
+      const entries = raw.entries
+        .map(parseProfileEntry)
+        .filter((item): item is ProfileEntry => item !== null);
+      return { entries };
+    });
   }
 
   setProfileEntry(
     key: string,
     value: string,
   ): Promise<Result<ProfileEntry, string>> {
-    return requestJson<ProfileEntry>(this.#config, "/profile", {
+    return requestJson(this.#config, "/profile", parseProfileEntry, {
       method: "PUT",
       body: JSON.stringify({ key, value }),
     });
@@ -302,17 +412,22 @@ export class AgentClient {
 
   searchNotes(query: string): Promise<Result<{ notes: MemoryNote[] }, string>> {
     const encoded = encodeURIComponent(query);
-    return requestJson<{ notes: MemoryNote[] }>(
-      this.#config,
-      `/notes?q=${encoded}`,
-    );
+    return requestJson(this.#config, `/notes?q=${encoded}`, (raw) => {
+      if (!isRecord(raw) || !Array.isArray(raw.notes)) {
+        return null;
+      }
+      const notes = raw.notes
+        .map(parseMemoryNote)
+        .filter((item): item is MemoryNote => item !== null);
+      return { notes };
+    });
   }
 
   addNote(
     content: string,
     category = "general",
   ): Promise<Result<MemoryNote, string>> {
-    return requestJson<MemoryNote>(this.#config, "/notes", {
+    return requestJson(this.#config, "/notes", parseMemoryNote, {
       method: "POST",
       body: JSON.stringify({ content, category }),
     });
@@ -348,10 +463,6 @@ export class AgentClient {
       }
       case "ops": {
         this.#send({ type: "watch", id: this.#nextId("resync") });
-        return;
-      }
-      case "approval_requested": {
-        this.#handlers.onApprovalRequested(message.approval);
         return;
       }
       case "takeover_requested": {

@@ -1,11 +1,10 @@
+import type { WatchEnd } from "@earendil-works/chord/watch";
 import type {
   ConversationView,
   ConversationWatch,
   ConversationWindow,
-  EntryId,
   EntryQuery,
   RegistryReader,
-  WatchEnd,
 } from "@earendil-works/pi-durable";
 import {
   type PiHarness,
@@ -15,14 +14,16 @@ import {
 import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
 
-import type { ApprovalRecord } from "./approvals";
 import type { BrowserTakeoverRecord } from "./browser";
-import type { ClientMessage, CommandResult, ServerMessage } from "./protocol";
+import {
+  type ClientMessage,
+  ClientMessageSchema,
+  type CommandResult,
+  type ServerMessage,
+} from "./protocol";
 
-const SESSION_TAG_PREFIX = "pi-session:";
-const SESSION_QUERY = "session";
-const MAX_PAGE = 100;
 const OPEN = 1;
+const SESSION_TAG_PREFIX = "pi-session:";
 
 function sessionTag(session: PiSessionId): string {
   return `${SESSION_TAG_PREFIX}${session}`;
@@ -32,51 +33,26 @@ function sessionFromRequest(
   request: Request,
   fallback: PiSessionId,
 ): PiSessionId {
-  const session = new URL(request.url).searchParams.get(SESSION_QUERY);
-  if (session === null || session === "") {
-    return fallback;
-  }
-  if (!/^[1-9][0-9]{0,15}$/.test(session)) {
-    throw new Error(`Invalid pi session ${JSON.stringify(session)}`);
-  }
-  return session;
+  const url = new URL(request.url);
+  const requested = url.searchParams.get("session")?.trim();
+  return requested || fallback;
 }
 
-function sessionOf(tags: readonly string[]): string | undefined {
-  const tag = tags.find((candidate) =>
-    candidate.startsWith(SESSION_TAG_PREFIX),
-  );
-  return tag?.slice(SESSION_TAG_PREFIX.length);
-}
-
-function isEntryId(value: unknown): value is EntryId {
-  return typeof value === "number" && Number.isSafeInteger(value);
-}
-
-function parseEntryQuery(query: unknown): Omit<EntryQuery, "conversationId"> {
-  const { minEntryId, maxEntryId, order } = (query ?? {}) as Record<
-    string,
-    unknown
-  >;
-  if (minEntryId !== undefined && !isEntryId(minEntryId)) {
-    throw new Error("Invalid minEntryId");
+function sessionFromTags(
+  tags: readonly string[],
+  fallback: PiSessionId,
+): PiSessionId {
+  for (const tag of tags) {
+    if (tag.startsWith(SESSION_TAG_PREFIX)) {
+      return tag.slice(SESSION_TAG_PREFIX.length);
+    }
   }
-  if (maxEntryId !== undefined && !isEntryId(maxEntryId)) {
-    throw new Error("Invalid maxEntryId");
-  }
-  if (order !== undefined && order !== "ascending" && order !== "descending") {
-    throw new Error("Invalid order");
-  }
-  return {
-    ...(minEntryId === undefined ? {} : { minEntryId }),
-    ...(maxEntryId === undefined ? {} : { maxEntryId }),
-    ...(order === undefined ? {} : { order }),
-  };
+  return fallback;
 }
 
 function resumeAfter(view: ConversationView): ConversationWindow {
   const newest = view.entries.at(-1)?.id ?? view.before;
-  return newest === undefined ? {} : { from: (newest + 1) as EntryId };
+  return newest === undefined ? {} : { from: newest };
 }
 
 function send(socket: WebSocket, message: ServerMessage): void {
@@ -91,16 +67,11 @@ function send(socket: WebSocket, message: ServerMessage): void {
 }
 
 type SocketCallbacks = {
-  readonly onResolveApproval: (
-    approvalId: string,
-    approved: boolean,
-    note?: string,
-  ) => Promise<CommandResult>;
   readonly onResumeTakeover: (
     takeoverId: string,
     note?: string,
   ) => Promise<CommandResult>;
-  readonly listPendingApprovals: () => ApprovalRecord[];
+  readonly onClearWaitingTakeovers: () => void;
   readonly listWaitingTakeovers: () => BrowserTakeoverRecord[];
 };
 
@@ -110,7 +81,6 @@ export class AgentSockets {
   readonly #getWebSockets: (tag?: string) => WebSocket[];
   readonly #callbacks: SocketCallbacks;
   readonly #watches = new Map<WebSocket, ConversationWatch>();
-  #closed = false;
 
   constructor(
     harness: PiHarness,
@@ -137,16 +107,6 @@ export class AgentSockets {
         onError: (connection) => this.#unwatch(connection),
       },
     };
-  }
-
-  broadcastApproval(approval: ApprovalRecord): void {
-    const message: ServerMessage = {
-      type: "approval_requested",
-      approval,
-    };
-    for (const socket of this.#getWebSockets()) {
-      send(socket, message);
-    }
   }
 
   broadcastTakeover(takeover: BrowserTakeoverRecord): void {
@@ -186,9 +146,6 @@ export class AgentSockets {
           description: tool.description,
         })),
     });
-    for (const approval of this.#callbacks.listPendingApprovals()) {
-      send(connection, { type: "approval_requested", approval });
-    }
     for (const takeover of this.#callbacks.listWaitingTakeovers()) {
       send(connection, { type: "takeover_requested", takeover });
     }
@@ -200,7 +157,7 @@ export class AgentSockets {
     window: ConversationWindow = {},
   ): Promise<void> {
     const watch = await this.#harness.session(session).watch(window);
-    if (this.#closed || socket.readyState !== OPEN) {
+    if (socket.readyState !== OPEN) {
       await watch.stop();
       return;
     }
@@ -252,7 +209,7 @@ export class AgentSockets {
       return;
     }
     this.#watches.delete(socket);
-    if (this.#closed || socket.readyState !== OPEN || end.kind === "stopped") {
+    if (socket.readyState !== OPEN || end.kind === "stopped") {
       return;
     }
     await this.#watchOrClose(socket, session, resumeAfter(last));
@@ -269,73 +226,63 @@ export class AgentSockets {
 
   async #onMessage(
     connection: Connection,
-    raw: WebSocketMessage,
+    message: WebSocketMessage,
   ): Promise<void> {
-    if (typeof raw !== "string") {
-      send(connection, { type: "error", message: "Expected JSON text frame" });
-      return;
-    }
-    let msg: ClientMessage;
+    const raw =
+      typeof message === "string" ? message : new TextDecoder().decode(message);
+    let parsedJson: unknown;
     try {
-      msg = JSON.parse(raw) as ClientMessage;
+      parsedJson = JSON.parse(raw);
     } catch {
-      send(connection, { type: "error", message: "Invalid JSON" });
+      send(connection, { type: "error", message: "Invalid JSON payload" });
       return;
     }
-    const id = "id" in msg ? msg.id : undefined;
-    const session = sessionOf(connection.tags ?? []) ?? ROOT_SESSION;
+    const parsed = ClientMessageSchema.safeParse(parsedJson);
+    if (!parsed.success) {
+      send(connection, { type: "error", message: "Invalid message payload" });
+      return;
+    }
+    const msg = parsed.data;
+    const session = sessionFromTags(connection.tags, ROOT_SESSION);
     try {
-      const result = await this.#dispatch(connection, session, msg);
-      if (id !== undefined) {
-        send(connection, { type: "result", id, result });
-      }
+      const result = await this.#handle(connection, session, msg);
+      send(connection, { type: "result", id: msg.id, result });
     } catch (thrown) {
-      send(connection, {
-        type: "error",
-        ...(id === undefined ? {} : { id }),
-        message: thrown instanceof Error ? thrown.message : String(thrown),
-      });
+      const errorMessage =
+        thrown instanceof Error ? thrown.message : String(thrown);
+      send(connection, { type: "error", id: msg.id, message: errorMessage });
     }
   }
 
-  async #dispatch(
-    socket: WebSocket,
+  async #handle(
+    connection: Connection,
     session: PiSessionId,
     msg: ClientMessage,
   ): Promise<CommandResult> {
     switch (msg.type) {
+      case "watch": {
+        await this.#watch(connection, session, {});
+        return { watching: session };
+      }
       case "submit": {
-        const receipt = await this.#harness.session(session).submit(msg.input, {
-          whenBusy: msg.whenBusy,
+        return this.#harness.session(session).submit(msg.input, {
           operationId: msg.operationId,
+          whenBusy: msg.whenBusy,
         });
-        return receipt;
       }
       case "abort": {
+        this.#callbacks.onClearWaitingTakeovers();
         return this.#harness.session(session).abort();
       }
       case "reset": {
+        this.#callbacks.onClearWaitingTakeovers();
         await this.#harness.session(session).reset(msg.handoff);
         return { ok: true };
       }
-      case "watch": {
-        const window: ConversationWindow =
-          msg.from === undefined ? {} : { from: msg.from };
-        await this.#watch(socket, session, window);
-        return { ok: true };
-      }
       case "entries": {
-        const limit = Math.max(1, Math.min(msg.limit, MAX_PAGE));
-        return this.#harness
-          .session(session)
-          .entries(parseEntryQuery(msg.query), limit);
-      }
-      case "resolve_approval": {
-        return this.#callbacks.onResolveApproval(
-          msg.approvalId,
-          msg.approved,
-          msg.note,
-        );
+        const query: Omit<EntryQuery, "conversationId"> = msg.query ?? {};
+        const limit = Math.max(1, Math.min(msg.limit, 200));
+        return this.#harness.session(session).entries(query, limit);
       }
       case "resume_takeover": {
         return this.#callbacks.onResumeTakeover(msg.takeoverId, msg.note);

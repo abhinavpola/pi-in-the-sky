@@ -8,13 +8,14 @@
   ],
   "type": "module",
   "scripts": {
-    "fallow": "fallow dead-code --fail-on-issues && fallow dupes",
+    "fallow": "fallow dead-code --production --type-aware --fail-on-issues && fallow dead-code --test-only-exports --type-aware --fail-on-issues && fallow dupes --fail-on-issues",
     "test": "bun run --filter '@pi-in-the-sky/cfw-agent' test",
     "typecheck": "bun check -b"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "fallow": "^3.50.0"
+    "fallow": "^3.50.0",
+    "fallow-type-aware": "3.50.0"
   },
   "peerDependencies": {
     "typescript": "^7"

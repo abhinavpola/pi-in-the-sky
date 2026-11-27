@@ -1,43 +1,32 @@
 import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
 import type { PiModel } from "agents/harness/pi";
 
-import type { Env } from "../env";
-import { PersonalAgent } from "../src/agent";
-import worker from "../src/index";
+import type { HttpFetcher } from "../src/http-tool";
+import worker, { PersonalAgent } from "../src/index";
 import {
   createStubProvider,
   type ScriptedTurn,
   STUB_MODEL,
 } from "./stub-provider";
 
+const scriptedQueues = new Map<string, ScriptedTurn[]>();
+
 export class TestPersonalAgent extends PersonalAgent {
-  #scriptedTurns: ScriptedTurn[] = [];
-  #observedToolOutputs: string[] = [];
+  #scriptKey = "default";
 
-  setScriptedTurns(turns: ScriptedTurn[]): void {
-    this.#scriptedTurns = [...turns];
-    this.#observedToolOutputs = [];
-  }
-
-  getObservedToolOutputs(): string[] {
-    return [...this.#observedToolOutputs];
+  setScript(key: string, turns: ScriptedTurn[]): void {
+    this.#scriptKey = key;
+    scriptedQueues.set(key, [...turns]);
   }
 
   protected override createModelRegistry(): { models: MutableModels } {
     const models = createModels();
     models.setProvider(
-      createStubProvider((context) => {
-        const lastMessage = context.messages.at(-1);
-        if (lastMessage && lastMessage.role === "toolResult") {
-          for (const part of lastMessage.content) {
-            if (part.type === "text") {
-              this.#observedToolOutputs.push(part.text);
-            }
-          }
-        }
-        const next = this.#scriptedTurns.shift();
+      createStubProvider(() => {
+        const queue = scriptedQueues.get(this.#scriptKey) ?? [];
+        const next = queue.shift();
         if (!next) {
-          return { text: "No scripted turns remaining." };
+          return { text: "Done." };
         }
         return next;
       }),
@@ -46,74 +35,72 @@ export class TestPersonalAgent extends PersonalAgent {
   }
 
   protected override resolveDefaultModel(): PiModel {
-    return { provider: STUB_MODEL.provider, id: STUB_MODEL.id };
+    return STUB_MODEL;
   }
 
-  protected override createFetcher(): typeof fetch {
-    const stubFetch = async (input: RequestInfo | URL): Promise<Response> => {
-      const url = new URL(
+  protected override createFetcher(): HttpFetcher {
+    return async (input, init) => {
+      const url =
         typeof input === "string"
           ? input
           : input instanceof URL
             ? input.toString()
-            : input.url,
-      );
+            : input.url;
 
-      if (
-        url.origin === "https://gmail.googleapis.com" &&
-        url.pathname === "/gmail/v1/users/me/messages"
-      ) {
-        return Response.json({ messages: [{ id: "msg-tokyo-2025" }] });
+      if (url.startsWith("https://gmail.test/users/me/messages?")) {
+        return Response.json({
+          messages: [{ id: "msg-tokyo-2025", threadId: "thread-tokyo-2025" }],
+        });
       }
 
-      if (
-        url.origin === "https://gmail.googleapis.com" &&
-        url.pathname === "/gmail/v1/users/me/messages/msg-tokyo-2025"
-      ) {
+      if (url === "https://gmail.test/users/me/messages/msg-tokyo-2025") {
         return Response.json({
           id: "msg-tokyo-2025",
-          snippet: "ANA NH7 SFO -> NRT, Oct 12-19, Window seat 14A, $940",
+          snippet:
+            "ANA NH7 SFO -> NRT, Oct 10-18, 2025, Window seat 14A, Park Hyatt Tokyo.",
+          payload: {
+            headers: [
+              {
+                name: "Subject",
+                value: "ANA Flight Confirmation - SFO to NRT",
+              },
+              { name: "From", value: "confirmations@ana.co.jp" },
+            ],
+          },
         });
       }
 
-      if (
-        url.origin === "https://www.googleapis.com" &&
-        url.pathname === "/calendar/v3/calendars/primary/events"
-      ) {
-        return Response.json({ items: [] });
-      }
-
-      if (
-        url.origin === "https://browser.example.test" &&
-        url.pathname === "/navigate"
-      ) {
+      if (url.startsWith("https://calendar.test/calendars/primary/events?")) {
         return Response.json({
-          url: "https://flights.example/search?from=SFO&to=NRT",
-          title: "SFO to NRT Flights",
+          items: [
+            {
+              summary: "Q4 Planning",
+              start: { dateTime: "2026-10-08T10:00:00Z" },
+              end: { dateTime: "2026-10-08T11:00:00Z" },
+            },
+          ],
         });
       }
 
-      if (
-        url.origin === "https://browser.example.test" &&
-        url.pathname === "/snapshot"
-      ) {
+      if (url === "https://browser.test/navigate") {
+        const body = typeof init?.body === "string" ? init.body : "{}";
         return Response.json({
-          text: "ANA NH7 Nonstop SFO->NRT Dec 12-19 Window 14A Total $980",
+          ok: true,
+          title: "ANA Flights - SFO to NRT",
+          echo: JSON.parse(body),
         });
       }
 
-      return Response.json(
-        { error: `Unexpected external URL: ${url.toString()}` },
-        { status: 404 },
-      );
+      if (url === "https://browser.test/snapshot") {
+        return Response.json({
+          ok: true,
+          text: "ANA NH7 nonstop SFO -> NRT Oct 12-20, 2026. Economy Window: $1,120 total.",
+        });
+      }
+
+      return new Response(`Unhandled test URL: ${url}`, { status: 404 });
     };
-
-    return stubFetch as typeof fetch;
   }
 }
 
-export default {
-  fetch(request: Request, env: Env): Promise<Response> {
-    return worker.fetch(request, env);
-  },
-};
+export default worker;

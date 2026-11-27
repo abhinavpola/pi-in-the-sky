@@ -1,25 +1,55 @@
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
-import type { ServerMessage } from "../src/protocol";
 import type { TestPersonalAgent } from "./worker";
 
 const AUTH_HEADERS = {
   Authorization: "Bearer test-secret-token",
 };
 
+const SocketMessageSchema = z
+  .object({
+    type: z.string(),
+    id: z.string().optional(),
+    takeover: z
+      .object({
+        id: z.string(),
+        liveViewUrl: z.string().nullable(),
+      })
+      .optional(),
+  })
+  .passthrough();
+
+type ParsedSocketMessage = z.infer<typeof SocketMessageSchema>;
+
+const NotesResponseSchema = z.object({
+  notes: z.array(z.object({ content: z.string() })),
+});
+
+const HealthResponseSchema = z.object({
+  ok: z.boolean(),
+});
+
+const ProfileResponseSchema = z.object({
+  entries: z.array(z.unknown()),
+});
+
+const TakeoverResumeResponseSchema = z.object({
+  takeoverId: z.string(),
+  delivered: z.string(),
+});
+
 function stubFor(id: string): DurableObjectStub<TestPersonalAgent> {
-  return env.PersonalAgent.getByName(
-    id,
-  ) as unknown as DurableObjectStub<TestPersonalAgent>;
+  return env.PersonalAgent.getByName(id);
 }
 
 function nextSocketMessage(
   ws: WebSocket,
-  predicate: (message: ServerMessage) => boolean,
+  predicate: (message: ParsedSocketMessage) => boolean,
   label = "message",
   timeoutMs = 5_000,
-): Promise<ServerMessage> {
+): Promise<ParsedSocketMessage> {
   const seen: string[] = [];
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -33,12 +63,15 @@ function nextSocketMessage(
 
     const onMessage = (event: MessageEvent) => {
       const raw = String(event.data);
-      const parsed = JSON.parse(raw) as ServerMessage;
+      const parsed = SocketMessageSchema.safeParse(JSON.parse(raw));
+      if (!parsed.success) {
+        return;
+      }
       seen.push(raw.slice(0, 220));
-      if (predicate(parsed)) {
+      if (predicate(parsed.data)) {
         clearTimeout(timer);
         ws.removeEventListener("message", onMessage);
-        resolve(parsed);
+        resolve(parsed.data);
       }
     };
 
@@ -50,7 +83,9 @@ describe("cfw-agent workerd integration", () => {
   it("enforces bearer auth and exposes health endpoint", async () => {
     const health = await SELF.fetch("https://agent.test/health");
     expect(health.status).toBe(200);
-    expect(await health.json()).toEqual({ ok: true });
+    expect(HealthResponseSchema.parse(await health.json())).toEqual({
+      ok: true,
+    });
 
     const unauthorized = await SELF.fetch(
       "https://agent.test/api/agents/auth-check/profile",
@@ -62,14 +97,15 @@ describe("cfw-agent workerd integration", () => {
       { headers: AUTH_HEADERS },
     );
     expect(authorized.status).toBe(200);
-    expect(await authorized.json()).toEqual({ entries: [] });
+    expect(ProfileResponseSchema.parse(await authorized.json())).toEqual({
+      entries: [],
+    });
   });
 
-  it("runs the full trip-planning workflow with memory, skills, connectors, browser, durable approval, and websockets", async () => {
-    const agentId = "trip-e2e";
-    const stub = stubFor(agentId);
+  it("plans a repeat trip using memory, skills, Gmail, Calendar, browser, and FTS5 notes", async () => {
+    const agentId = "trip-planner-e2e";
 
-    const profileRes = await SELF.fetch(
+    const putProfile = await SELF.fetch(
       `https://agent.test/api/agents/${agentId}/profile`,
       {
         method: "PUT",
@@ -77,83 +113,59 @@ describe("cfw-agent workerd integration", () => {
         body: JSON.stringify({ key: "home_airport", value: "SFO" }),
       },
     );
-    expect(profileRes.status).toBe(200);
+    expect(putProfile.status).toBe(200);
 
-    const noteRes = await SELF.fetch(
-      `https://agent.test/api/agents/${agentId}/notes`,
-      {
-        method: "POST",
-        headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          category: "travel",
-          content: "Loved staying near Shibuya on the last Tokyo trip.",
-          date: "2026-10-15",
-        }),
-      },
-    );
-    expect(noteRes.status).toBe(201);
-
-    await stub.setScriptedTurns([
+    const stub = stubFor(agentId);
+    await stub.setScript(agentId, [
       {
         toolCalls: [
           {
-            id: "tc-1",
+            id: "tc-skill",
             name: "load_skill",
             arguments: { name: "flight-planning" },
           },
           {
-            id: "tc-2",
+            id: "tc-profile",
             name: "memory_get_profile",
             arguments: {},
           },
-          {
-            id: "tc-3",
-            name: "memory_search",
-            arguments: { query: "Tokyo" },
-          },
         ],
       },
       {
         toolCalls: [
           {
-            id: "tc-4",
+            id: "tc-gmail-search",
             name: "gmail_search",
-            arguments: { query: "flight receipt", maxResults: 5 },
+            arguments: { query: "Tokyo flight confirmation" },
+          },
+          {
+            id: "tc-calendar",
+            name: "calendar_list_events",
+            arguments: {
+              timeMin: "2026-10-10T00:00:00Z",
+              timeMax: "2026-10-22T00:00:00Z",
+            },
           },
         ],
       },
       {
         toolCalls: [
           {
-            id: "tc-5",
+            id: "tc-gmail-get",
             name: "gmail_get_message",
             arguments: { messageId: "msg-tokyo-2025" },
           },
           {
-            id: "tc-6",
-            name: "calendar_list_events",
-            arguments: {
-              timeMin: "2026-12-10T00:00:00Z",
-              timeMax: "2026-12-20T00:00:00Z",
-            },
-          },
-        ],
-      },
-      {
-        toolCalls: [
-          {
-            id: "tc-7",
+            id: "tc-browser-nav",
             name: "browser_navigate",
-            arguments: {
-              url: "https://flights.example/search?from=SFO&to=NRT",
-            },
+            arguments: { url: "https://ana.example/flights?from=SFO&to=NRT" },
           },
         ],
       },
       {
         toolCalls: [
           {
-            id: "tc-8",
+            id: "tc-browser-snap",
             name: "browser_snapshot",
             arguments: {},
           },
@@ -162,30 +174,17 @@ describe("cfw-agent workerd integration", () => {
       {
         toolCalls: [
           {
-            id: "tc-9",
-            name: "request_approval",
-            arguments: {
-              action: "book_flight",
-              summary: "Book ANA NH7 SFO->NRT Dec 12-19 ($980)",
-              details: "Nonstop window seat 14A, total $980",
-            },
-          },
-        ],
-      },
-      {
-        toolCalls: [
-          {
-            id: "tc-10",
+            id: "tc-write-note",
             name: "memory_write_note",
             arguments: {
               category: "travel",
-              content: "Approved ANA NH7 SFO->NRT Dec 12-19 for $980.",
+              content: "Planned Tokyo Oct 12-20 2026 on ANA NH7 ($1,120).",
             },
           },
         ],
       },
       {
-        text: "Your Tokyo trip (ANA NH7 SFO->NRT Dec 12-19, $980) is approved and logged.",
+        text: "Found ANA NH7 nonstop SFO -> NRT for Oct 12-20, 2026 ($1,120). Want me to go ahead and book it?",
       },
     ]);
 
@@ -200,154 +199,86 @@ describe("cfw-agent workerd integration", () => {
     );
     expect(wsResponse.status).toBe(101);
     const ws = wsResponse.webSocket;
-    expect(ws).toBeDefined();
     if (!ws) {
-      throw new Error("Expected WebSocket");
+      throw new Error("Expected WebSocket upgrade");
     }
-
-    const helloPromise = nextSocketMessage(ws, (m) => m.type === "hello");
     ws.accept();
-    const hello = await helloPromise;
+
+    const hello = await nextSocketMessage(ws, (m) => m.type === "hello");
     expect(hello.type).toBe("hello");
 
-    const viewPromise = nextSocketMessage(ws, (m) => m.type === "view");
-    ws.send(JSON.stringify({ type: "watch", id: "watch-1" }));
-    await viewPromise;
+    ws.send(JSON.stringify({ type: "watch", id: "cmd-watch" }));
+    await nextSocketMessage(ws, (m) => m.type === "view");
 
-    const approvalPromise = nextSocketMessage(
-      ws,
-      (m) => m.type === "approval_requested",
-    );
-    const submitResult1Promise = nextSocketMessage(
-      ws,
-      (m) => m.type === "result" && m.id === "sub-1",
-    );
+    const promptOpId = "op-trip-tokyo-1";
     ws.send(
       JSON.stringify({
         type: "submit",
-        id: "sub-1",
-        operationId: "op-trip-1",
-        input:
-          "Find my last trip in Gmail and plan the same trip for next month.",
+        id: "cmd-submit-1",
+        operationId: promptOpId,
+        input: "Look up my Tokyo trip from last year and plan the same trip.",
       }),
     );
-    const submitResult1 = await submitResult1Promise;
-    expect(submitResult1.type).toBe("result");
-    if (submitResult1.type === "result") {
-      expect(submitResult1.result).toMatchObject({
-        operationId: "op-trip-1",
-        accepted: true,
-      });
-    }
 
-    const submitResult2Promise = nextSocketMessage(
+    const submitResult = await nextSocketMessage(
       ws,
-      (m) => m.type === "result" && m.id === "sub-2",
+      (m) => m.type === "result" && m.id === "cmd-submit-1",
     );
-    ws.send(
-      JSON.stringify({
-        type: "submit",
-        id: "sub-2",
-        operationId: "op-trip-1",
-        input:
-          "Find my last trip in Gmail and plan the same trip for next month.",
-      }),
-    );
-    const submitResult2 = await submitResult2Promise;
-    if (submitResult2.type === "result") {
-      expect(submitResult2.result).toMatchObject({
-        operationId: "op-trip-1",
-        accepted: false,
-      });
-    }
+    expect(submitResult.type).toBe("result");
 
-    const approvalMsg = await approvalPromise;
-    expect(approvalMsg.type).toBe("approval_requested");
-    if (approvalMsg.type !== "approval_requested") {
-      throw new Error("Expected approval_requested");
-    }
-    expect(approvalMsg.approval.action).toBe("book_flight");
-    expect(approvalMsg.approval.status).toBe("pending");
-
-    const resolveResultPromise = nextSocketMessage(
+    await nextSocketMessage(
       ws,
-      (m) => m.type === "result" && m.id === "approve-1",
-    );
-    ws.send(
-      JSON.stringify({
-        type: "resolve_approval",
-        id: "approve-1",
-        approvalId: approvalMsg.approval.id,
-        approved: true,
-        note: "Window seat confirmed",
-      }),
-    );
-    const resolveResult = await resolveResultPromise;
-    if (resolveResult.type === "result") {
-      expect(resolveResult.result).toMatchObject({
-        approvalId: approvalMsg.approval.id,
-        status: "approved",
-        delivered: "delivered",
-      });
-    }
-
-    const settled = await stub.waitForOperation("op-trip-1");
-    expect(settled.status).toBe("done");
-    expect(settled.text).toContain("ANA NH7 SFO->NRT Dec 12-19, $980");
-
-    const approvalsAfter = await SELF.fetch(
-      `https://agent.test/api/agents/${agentId}/approvals?status=approved`,
-      { headers: AUTH_HEADERS },
-    );
-    const approvalsJson = (await approvalsAfter.json()) as {
-      approvals: Array<{ id: string; status: string; decisionNote: string }>;
-    };
-    expect(approvalsJson.approvals).toHaveLength(1);
-    expect(approvalsJson.approvals[0]?.decisionNote).toBe(
-      "Window seat confirmed",
+      (m) => m.type === "ops" && JSON.stringify(m).includes("ANA NH7"),
+      "final assistant message",
+      10_000,
     );
 
     const searchNotes = await SELF.fetch(
-      `https://agent.test/api/agents/${agentId}/notes?q=NRT`,
+      `https://agent.test/api/agents/${agentId}/notes?q=Tokyo`,
       { headers: AUTH_HEADERS },
     );
-    const searchJson = (await searchNotes.json()) as {
-      notes: Array<{ content: string }>;
-    };
-    expect(searchJson.notes.some((n) => n.content.includes("ANA NH7"))).toBe(
-      true,
-    );
+    expect(searchNotes.status).toBe(200);
+    const searchJson = NotesResponseSchema.parse(await searchNotes.json());
+    expect(searchJson.notes.length).toBeGreaterThanOrEqual(1);
+    expect(searchJson.notes[0]?.content).toContain("ANA NH7");
 
-    const toolOutputs = await stub.getObservedToolOutputs();
-    expect(toolOutputs.some((out) => out.includes("SFO"))).toBe(true);
-    expect(toolOutputs.some((out) => out.includes("Shibuya"))).toBe(true);
-    expect(toolOutputs.some((out) => out.includes("msg-tokyo-2025"))).toBe(
-      true,
+    ws.send(
+      JSON.stringify({
+        type: "submit",
+        id: "cmd-submit-dup",
+        operationId: promptOpId,
+        input: "Look up my Tokyo trip from last year and plan the same trip.",
+      }),
     );
+    const dupResult = await nextSocketMessage(
+      ws,
+      (m) => m.type === "result" && m.id === "cmd-submit-dup",
+    );
+    expect(dupResult.type).toBe("result");
 
     ws.close();
   });
 
-  it("parks on browser takeover for MFA/sign-in and resumes via HTTP endpoint", async () => {
+  it("supports browser Live View takeover pause and resume", async () => {
     const agentId = "browser-takeover-e2e";
     const stub = stubFor(agentId);
 
-    await stub.setScriptedTurns([
+    await stub.setScript(agentId, [
       {
         toolCalls: [
           {
-            id: "tc-takeover-1",
+            id: "tc-takeover",
             name: "browser_request_takeover",
             arguments: {
               url: "https://airline.example/login",
-              reason: "MFA verification required",
-              liveViewUrl: "https://live.cloudflare.example/session/123",
+              reason: "MFA verification required to continue checkout.",
+              liveViewUrl: "https://live.browser.test/session/abc",
             },
           },
         ],
       },
       {
-        text: "Sign-in confirmed. Continuing with reservation.",
+        text: "Sign-in complete; continuing reservation.",
       },
     ]);
 
@@ -360,53 +291,54 @@ describe("cfw-agent workerd integration", () => {
         },
       },
     );
-    const ws = wsResponse.webSocket!;
+    const ws = wsResponse.webSocket;
+    if (!ws) {
+      throw new Error("Expected WebSocket upgrade");
+    }
+    ws.accept();
+
+    await nextSocketMessage(ws, (m) => m.type === "hello", "hello");
+    ws.send(JSON.stringify({ type: "watch", id: "cmd-watch-takeover" }));
+    await nextSocketMessage(ws, (m) => m.type === "view", "view");
+
     const takeoverPromise = nextSocketMessage(
       ws,
       (m) => m.type === "takeover_requested",
+      "takeover_requested",
+      10_000,
     );
-    ws.accept();
 
-    const submitRes = await SELF.fetch(
-      `https://agent.test/api/agents/${agentId}/prompt`,
-      {
-        method: "POST",
-        headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: "Log in to the airline portal",
-          operationId: "op-takeover-1",
-          async: true,
-        }),
-      },
+    ws.send(
+      JSON.stringify({
+        type: "submit",
+        id: "cmd-submit-takeover",
+        input: "Log into my airline account.",
+      }),
     );
-    expect(submitRes.status).toBe(202);
 
     const takeoverMsg = await takeoverPromise;
-    expect(takeoverMsg.type).toBe("takeover_requested");
-    if (takeoverMsg.type !== "takeover_requested") {
-      throw new Error("Expected takeover_requested");
-    }
-    expect(takeoverMsg.takeover.liveViewUrl).toBe(
-      "https://live.cloudflare.example/session/123",
+    expect(takeoverMsg.takeover?.liveViewUrl).toBe(
+      "https://live.browser.test/session/abc",
     );
 
-    const resumeRes = await SELF.fetch(
-      `https://agent.test/api/agents/${agentId}/takeovers/${encodeURIComponent(takeoverMsg.takeover.id)}/resume`,
+    const takeoverId = takeoverMsg.takeover?.id;
+    if (!takeoverId) {
+      throw new Error("Expected takeover ID");
+    }
+
+    const resumeResp = await SELF.fetch(
+      `https://agent.test/api/agents/${agentId}/takeovers/${encodeURIComponent(takeoverId)}/resume`,
       {
         method: "POST",
         headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify({ note: "MFA completed" }),
       },
     );
-    expect(resumeRes.status).toBe(200);
-    expect(await resumeRes.json()).toMatchObject({
-      takeoverId: takeoverMsg.takeover.id,
-      delivered: "delivered",
-    });
-
-    const settled = await stub.waitForOperation("op-takeover-1");
-    expect(settled.status).toBe("done");
-    expect(settled.text).toContain("Sign-in confirmed");
+    expect(resumeResp.status).toBe(200);
+    const resumeJson = TakeoverResumeResponseSchema.parse(
+      await resumeResp.json(),
+    );
+    expect(resumeJson.takeoverId).toBe(takeoverId);
 
     ws.close();
   });

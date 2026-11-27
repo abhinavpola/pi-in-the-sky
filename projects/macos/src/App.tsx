@@ -6,7 +6,6 @@ import { ChatPane } from "./components/ChatPane";
 import { MemoryPane } from "./components/MemoryPane";
 import { SettingsPane } from "./components/SettingsPane";
 import type {
-  ApprovalItem,
   ChatMessage,
   ConnectionConfig,
   ConnectionState,
@@ -32,7 +31,6 @@ export function App() {
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("disconnected");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [pendingApprovals, setPendingApprovals] = useState<ApprovalItem[]>([]);
   const [activeTakeovers, setActiveTakeovers] = useState<TakeoverItem[]>([]);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
@@ -41,12 +39,6 @@ export function App() {
       new AgentClient(DEFAULT_CONFIG, {
         onConnectionChange: setConnectionState,
         onMessagesChange: setMessages,
-        onApprovalRequested: (approval) => {
-          setPendingApprovals((prev) => [
-            ...prev.filter((item) => item.id !== approval.id),
-            approval,
-          ]);
-        },
         onTakeoverRequested: (takeover) => {
           setActiveTakeovers((prev) => [
             ...prev.filter((item) => item.id !== takeover.id),
@@ -54,7 +46,6 @@ export function App() {
           ]);
         },
         onReset: () => {
-          setPendingApprovals([]);
           setActiveTakeovers([]);
         },
         onError: setErrorBanner,
@@ -69,11 +60,6 @@ export function App() {
     };
   }, [client]);
 
-  const handleResolveApproval = (id: string, approved: boolean) => {
-    client.resolveApproval(id, approved);
-    setPendingApprovals((prev) => prev.filter((item) => item.id !== id));
-  };
-
   const handleResumeTakeover = (id: string) => {
     client.resumeTakeover(id);
     setActiveTakeovers((prev) => prev.filter((item) => item.id !== id));
@@ -85,14 +71,12 @@ export function App() {
         return (
           <ChatPane
             messages={messages}
-            pendingApprovals={pendingApprovals}
             activeTakeovers={activeTakeovers}
             onSend={(text) => {
               setErrorBanner(null);
               return client.submitPrompt(text);
             }}
             onAbort={() => client.abort()}
-            onResolveApproval={handleResolveApproval}
             onResumeTakeover={handleResumeTakeover}
           />
         );

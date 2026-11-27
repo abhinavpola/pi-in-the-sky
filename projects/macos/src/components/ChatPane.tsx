@@ -9,25 +9,21 @@ import {
   View,
 } from "react-native";
 
-import type { ApprovalItem, ChatMessage, TakeoverItem } from "../types";
+import type { ChatMessage, TakeoverItem } from "../types";
 
 type ChatPaneProps = {
   readonly messages: readonly ChatMessage[];
-  readonly pendingApprovals: readonly ApprovalItem[];
   readonly activeTakeovers: readonly TakeoverItem[];
   readonly onSend: (text: string) => boolean;
   readonly onAbort: () => void;
-  readonly onResolveApproval: (id: string, approved: boolean) => void;
   readonly onResumeTakeover: (id: string) => void;
 };
 
 export function ChatPane({
   messages,
-  pendingApprovals,
   activeTakeovers,
   onSend,
   onAbort,
-  onResolveApproval,
   onResumeTakeover,
 }: ChatPaneProps) {
   const [draft, setDraft] = useState("");
@@ -67,32 +63,6 @@ export function ChatPane({
           ))
         )}
 
-        {pendingApprovals.map((approval) => (
-          <View key={approval.id} style={styles.actionCard}>
-            <Text style={styles.cardTitle}>
-              Approval Required: {approval.action}
-            </Text>
-            <Text style={styles.body}>{approval.summary}</Text>
-            {approval.details ? (
-              <Text style={styles.subtle}>{approval.details}</Text>
-            ) : null}
-            <View style={styles.row}>
-              <Pressable
-                style={styles.approveButton}
-                onPress={() => onResolveApproval(approval.id, true)}
-              >
-                <Text style={styles.buttonText}>Approve</Text>
-              </Pressable>
-              <Pressable
-                style={styles.rejectButton}
-                onPress={() => onResolveApproval(approval.id, false)}
-              >
-                <Text style={styles.buttonText}>Reject</Text>
-              </Pressable>
-            </View>
-          </View>
-        ))}
-
         {activeTakeovers.map((takeover) => (
           <View key={takeover.id} style={styles.actionCard}>
             <Text style={styles.cardTitle}>Browser Takeover Needed</Text>
@@ -112,7 +82,7 @@ export function ChatPane({
                 </Pressable>
               ) : null}
               <Pressable
-                style={styles.approveButton}
+                style={styles.resumeButton}
                 onPress={() => onResumeTakeover(takeover.id)}
               >
                 <Text style={styles.buttonText}>Resume Agent</Text>
@@ -134,7 +104,7 @@ export function ChatPane({
         <Pressable style={styles.sendButton} onPress={handleSend}>
           <Text style={styles.buttonText}>Send</Text>
         </Pressable>
-        <Pressable style={styles.rejectButton} onPress={onAbort}>
+        <Pressable style={styles.stopButton} onPress={onAbort}>
           <Text style={styles.buttonText}>Stop</Text>
         </Pressable>
       </View>
@@ -187,13 +157,13 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     justifyContent: "center",
   },
-  approveButton: {
+  resumeButton: {
     backgroundColor: "#16a34a",
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
   },
-  rejectButton: {
+  stopButton: {
     backgroundColor: "#dc2626",
     paddingHorizontal: 12,
     paddingVertical: 8,

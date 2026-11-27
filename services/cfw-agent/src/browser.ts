@@ -7,11 +7,25 @@ import {
 import { bool, obj, opt, str } from "@earendil-works/pi-schema";
 import { err } from "@pi-in-the-sky/result-monad";
 
-import { fetchJsonWithBearer, toToolResult } from "./http-tool";
+import {
+  fetchJsonWithBearer,
+  type HttpFetcher,
+  toToolResult,
+} from "./http-tool";
 
-type BrowserConfig = {
-  readonly endpoint?: string;
-  readonly token?: string;
+const TakeoverResumeSchema = obj({
+  resumed: bool(),
+  note: opt(str()),
+});
+
+export const BrowserTakeoverSignal = defineSignal({
+  name: "personal-agent:browser-takeover",
+  version: 1,
+  schema: TakeoverResumeSchema,
+});
+
+type TakeoverCheckpoint = {
+  readonly takeoverId: string;
 };
 
 export type BrowserTakeoverRecord = {
@@ -24,30 +38,30 @@ export type BrowserTakeoverRecord = {
   readonly createdAt: number;
 };
 
-const TakeoverResumeSchema = obj({
-  resumed: bool(),
-  note: opt(str()),
-});
+type BrowserRuntimeConfig = {
+  readonly endpoint?: string;
+  readonly token?: string;
+};
 
-export const BrowserTakeoverSignal = defineSignal({
-  name: "browser.takeover",
-  version: 1,
-  schema: TakeoverResumeSchema,
-});
+type BrowserTakeoverRow = {
+  id: string;
+  task_id: TaskId;
+  url: string;
+  live_view_url: string | null;
+  reason: string;
+  status: "waiting" | "resumed";
+  created_at: number;
+};
 
 export class BrowserStore {
   readonly #sql: SqlStorage;
 
   constructor(sql: SqlStorage) {
     this.#sql = sql;
-    this.#migrate();
-  }
-
-  #migrate(): void {
     this.#sql.exec(`
       CREATE TABLE IF NOT EXISTS browser_takeovers (
         id TEXT PRIMARY KEY,
-        task_id TEXT NOT NULL,
+        task_id INTEGER NOT NULL,
         url TEXT NOT NULL,
         live_view_url TEXT,
         reason TEXT NOT NULL,
@@ -70,27 +84,23 @@ export class BrowserStore {
         id, task_id, url, live_view_url, reason, status, created_at
       ) VALUES (?, ?, ?, ?, ?, 'waiting', ?)`,
       input.id,
-      String(input.taskId),
+      Number(input.taskId),
       input.url,
       input.liveViewUrl,
       input.reason,
       createdAt,
     );
-    return this.getTakeover(input.id)!;
+    const created = this.getTakeover(input.id);
+    if (!created) {
+      throw new Error(`Failed to persist browser takeover ${input.id}`);
+    }
+    return created;
   }
 
-  #toTakeover(row: {
-    id: string;
-    task_id: string;
-    url: string;
-    live_view_url: string | null;
-    reason: string;
-    status: "waiting" | "resumed";
-    created_at: number;
-  }): BrowserTakeoverRecord {
+  #toTakeover(row: BrowserTakeoverRow): BrowserTakeoverRecord {
     return {
       id: row.id,
-      taskId: row.task_id as unknown as TaskId,
+      taskId: row.task_id,
       url: row.url,
       liveViewUrl: row.live_view_url,
       reason: row.reason,
@@ -101,15 +111,7 @@ export class BrowserStore {
 
   getTakeover(id: string): BrowserTakeoverRecord | undefined {
     const rows = this.#sql
-      .exec<{
-        id: string;
-        task_id: string;
-        url: string;
-        live_view_url: string | null;
-        reason: string;
-        status: "waiting" | "resumed";
-        created_at: number;
-      }>(
+      .exec<BrowserTakeoverRow>(
         "SELECT id, task_id, url, live_view_url, reason, status, created_at FROM browser_takeovers WHERE id = ?",
         id,
       )
@@ -123,15 +125,7 @@ export class BrowserStore {
 
   listWaitingTakeovers(): BrowserTakeoverRecord[] {
     const rows = this.#sql
-      .exec<{
-        id: string;
-        task_id: string;
-        url: string;
-        live_view_url: string | null;
-        reason: string;
-        status: "waiting" | "resumed";
-        created_at: number;
-      }>(
+      .exec<BrowserTakeoverRow>(
         "SELECT id, task_id, url, live_view_url, reason, status, created_at FROM browser_takeovers WHERE status = 'waiting' ORDER BY created_at ASC",
       )
       .toArray();
@@ -142,6 +136,12 @@ export class BrowserStore {
     this.#sql.exec(
       "UPDATE browser_takeovers SET status = 'resumed' WHERE id = ?",
       id,
+    );
+  }
+
+  clearWaitingTakeovers(): void {
+    this.#sql.exec(
+      "UPDATE browser_takeovers SET status = 'resumed' WHERE status = 'waiting'",
     );
   }
 }
@@ -163,89 +163,88 @@ const FillSchema = obj({
   value: str(),
 });
 
-const TakeoverSchema = obj({
+const RequestTakeoverSchema = obj({
   url: str(),
   reason: str(),
   liveViewUrl: opt(str()),
 });
 
-type TakeoverCheckpoint = {
-  readonly takeoverId: string;
-};
+type BrowserAction = "navigate" | "snapshot" | "click" | "fill";
 
 export function createBrowserExtension(
   store: BrowserStore,
-  getConfig: () => BrowserConfig,
-  onTakeoverRequested?: (record: BrowserTakeoverRecord) => void,
-  fetcher: typeof fetch = fetch,
+  getConfig: () => BrowserRuntimeConfig,
+  onTakeoverRequested: (record: BrowserTakeoverRecord) => void,
+  fetcher: HttpFetcher = (input, init) => fetch(input, init),
 ): Extension {
-  const runAction = async (
-    action: "navigate" | "snapshot" | "click" | "fill",
+  const invokeBrowser = async (
+    action: BrowserAction,
     payload: Record<string, unknown>,
   ) => {
     const config = getConfig();
     if (!config.endpoint) {
       return toToolResult(
         err(
-          "Browser runtime endpoint is not configured. Set BROWSER_RUN_ENDPOINT.",
+          "Browser runtime is not configured. Set BROWSER_RUN_ENDPOINT to enable browser tools.",
         ),
       );
     }
     const base = config.endpoint.replace(/\/$/, "");
-    return toToolResult(
-      await fetchJsonWithBearer(`${base}/${action}`, fetcher, {
-        token: config.token,
-        errorPrefix: "Browser",
-        init: {
-          method: "POST",
-          body: JSON.stringify(payload),
-        },
-      }),
-    );
+    const result = await fetchJsonWithBearer(`${base}/${action}`, fetcher, {
+      token: config.token,
+      init: {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      errorPrefix: "Browser runtime error",
+    });
+    return toToolResult(result);
   };
 
   const navigateTool: ToolRegistration<typeof NavigateSchema> = {
     name: "browser_navigate",
-    description: "Navigate the active browser tab to a URL.",
+    description:
+      "Navigate the remote browser session to a URL and return the page title and text summary.",
     parameters: NavigateSchema,
     replay: "safe",
-    execute: ({ url }) => runAction("navigate", { url }),
+    execute: ({ url }) => invokeBrowser("navigate", { url }),
   };
 
   const snapshotTool: ToolRegistration<typeof SnapshotSchema> = {
     name: "browser_snapshot",
     description:
-      "Read a structured snapshot of the current browser page or a specific CSS selector.",
+      "Capture an accessibility/DOM snapshot of the current browser page or a CSS selector.",
     parameters: SnapshotSchema,
     replay: "safe",
-    execute: ({ selector }) => runAction("snapshot", { selector }),
+    execute: ({ selector }) => invokeBrowser("snapshot", { selector }),
   };
 
   const clickTool: ToolRegistration<typeof ClickSchema> = {
     name: "browser_click",
-    description: "Click an element matching a CSS selector in the browser.",
+    description: "Click an element in the remote browser by CSS selector.",
     parameters: ClickSchema,
     replay: "unsafe",
-    execute: ({ selector }) => runAction("click", { selector }),
+    execute: ({ selector }) => invokeBrowser("click", { selector }),
   };
 
   const fillTool: ToolRegistration<typeof FillSchema> = {
     name: "browser_fill",
-    description: "Fill an input field matching a CSS selector with a value.",
+    description: "Fill an input field in the remote browser by CSS selector.",
     parameters: FillSchema,
     replay: "unsafe",
-    execute: ({ selector, value }) => runAction("fill", { selector, value }),
+    execute: ({ selector, value }) =>
+      invokeBrowser("fill", { selector, value }),
   };
 
-  const takeoverTool: ToolRegistration<
-    typeof TakeoverSchema,
+  const requestTakeoverTool: ToolRegistration<
+    typeof RequestTakeoverSchema,
     TakeoverCheckpoint,
     TakeoverCheckpoint
   > = {
     name: "browser_request_takeover",
     description:
-      "Pause browser automation and hand control to the user via Live View for sign-in, CAPTCHA, or MFA.",
-    parameters: TakeoverSchema,
+      "Pause the agent and ask the user to take over the browser Live View for login, MFA, CAPTCHA, or checkout.",
+    parameters: RequestTakeoverSchema,
     replay: "safe",
     async execute(args, api, context) {
       if (api.wake?.reason === "signal" && api.checkpoint) {
@@ -274,7 +273,6 @@ export function createBrowserExtension(
           output: [{ type: "text", text: "Browser takeover expired." }],
         };
       }
-
       const takeoverId = api.callId;
       const record = store.createTakeover({
         id: takeoverId,
@@ -283,18 +281,28 @@ export function createBrowserExtension(
         liveViewUrl: args.liveViewUrl ?? null,
         reason: args.reason,
       });
-      onTakeoverRequested?.(record);
-
+      onTakeoverRequested(record);
       return {
-        kind: "sleep",
-        checkpoint: { takeoverId },
-        signals: [BrowserTakeoverSignal.key(takeoverId)],
+        park: {
+          checkpoint: { takeoverId },
+          wait: {
+            kind: "signal",
+            signal: BrowserTakeoverSignal,
+            key: takeoverId,
+          },
+        },
       };
     },
   };
 
   return {
     name: "browser",
-    tools: [navigateTool, snapshotTool, clickTool, fillTool, takeoverTool],
+    tools: [
+      navigateTool,
+      snapshotTool,
+      clickTool,
+      fillTool,
+      requestTakeoverTool,
+    ],
   };
 }

@@ -1,9 +1,9 @@
-import type { Env } from "../env";
+import type { TestPersonalAgent } from "./worker";
 
 declare global {
   namespace Cloudflare {
     interface Env extends Record<string, unknown> {
-      PersonalAgent: Env["PersonalAgent"];
+      PersonalAgent: DurableObjectNamespace<TestPersonalAgent>;
     }
   }
 }

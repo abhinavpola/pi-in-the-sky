@@ -7,6 +7,7 @@
       "devDependencies": {
         "@types/bun": "latest",
         "fallow": "^3.50.0",
+        "fallow-type-aware": "3.50.0",
       },
       "peerDependencies": {
         "typescript": "^7",
@@ -775,6 +776,8 @@
     "extend": ["extend@3.0.2", "", {}, "sha512-fjquC59cD7CyW6urNXK0FBufkZcoiGG80wTuPujX590cB5Ttln20E2UB4S/WARVqhXffZl2LNgS+gQdPIIim/g=="],
 
     "fallow": ["fallow@3.50.0", "", { "dependencies": { "detect-libc": "2.1.2" }, "optionalDependencies": { "@fallow-cli/darwin-arm64": "3.50.0", "@fallow-cli/darwin-x64": "3.50.0", "@fallow-cli/linux-arm64-gnu": "3.50.0", "@fallow-cli/linux-arm64-musl": "3.50.0", "@fallow-cli/linux-x64-gnu": "3.50.0", "@fallow-cli/linux-x64-musl": "3.50.0", "@fallow-cli/win32-arm64-msvc": "3.50.0", "@fallow-cli/win32-x64-msvc": "3.50.0" }, "bin": { "fallow": "bin/fallow", "fallow-lsp": "bin/fallow-lsp", "fallow-mcp": "bin/fallow-mcp" } }, "sha512-UYX4g+Ec3HJkz7rCd6Bi9lRQvOmV92XZwCV2kZk9GrMTnOmjxOmsI2uv5UIhMo9sOiyzO7aZ0JyRFTZVexthBA=="],
+
+    "fallow-type-aware": ["fallow-type-aware@3.50.0", "", { "dependencies": { "typescript": "7.0.2" }, "peerDependencies": { "tsrs": "*" }, "optionalPeers": ["tsrs"], "bin": { "fallow-type-aware": "fallow-type-aware.mjs" } }, "sha512-yhwi0nqAa/GBR2il5RgcTPyO8tvkOm2qxuDicUvRKm4vyf6Juf0nteSpqaObCrgS3Whp2FluX+x+pv/jpU2cjg=="],
 
     "fast-json-stable-stringify": ["fast-json-stable-stringify@2.1.0", "", {}, "sha512-lhd/wF+Lk98HZoTCtlVraHtfh5XYijIjalXck7saUtuanSDyLMxnHhSXEDJqHxD7msR8D0uCmqlkwjCV8xvwHw=="],
 

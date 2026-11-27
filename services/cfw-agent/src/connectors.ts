@@ -2,7 +2,11 @@ import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { int, obj, opt, str } from "@earendil-works/pi-schema";
 import { err } from "@pi-in-the-sky/result-monad";
 
-import { fetchJsonWithBearer, toToolResult } from "./http-tool";
+import {
+  fetchJsonWithBearer,
+  type HttpFetcher,
+  toToolResult,
+} from "./http-tool";
 
 export type ConnectorProvider = "gmail" | "google_calendar";
 
@@ -103,7 +107,7 @@ function encodeBase64UrlUtf8(input: string): string {
 export function createConnectorsExtension(
   store: ConnectorStore,
   getConfig: () => ConnectorConfig,
-  fetcher: typeof fetch = fetch,
+  fetcher: HttpFetcher = (input, init) => fetch(input, init),
 ): Extension {
   const resolveToken = (provider: ConnectorProvider): string | undefined => {
     const stored = store.getAccessToken(provider);

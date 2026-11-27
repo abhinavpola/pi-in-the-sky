@@ -8,20 +8,12 @@ export type ConnectionConfig = {
   readonly authToken: string;
 };
 
-type ChatRole = "user" | "assistant" | "system";
+type ChatRole = "user" | "assistant";
 
 export type ChatMessage = {
   readonly id: string;
   readonly role: ChatRole;
   readonly text: string;
-};
-
-export type ApprovalItem = {
-  readonly id: string;
-  readonly action: string;
-  readonly summary: string;
-  readonly details: string;
-  readonly status: "pending" | "approved" | "rejected";
 };
 
 export type TakeoverItem = {
@@ -50,7 +42,6 @@ export type IncomingView = {
   readonly entries?: unknown[];
   readonly pi?: {
     readonly live?: {
-      readonly status?: string;
       readonly message?: { readonly content?: unknown };
       readonly error?: string;
     } | null;
@@ -58,10 +49,9 @@ export type IncomingView = {
 };
 
 export type IncomingSocketMessage =
-  | { readonly type: "hello"; readonly session: string }
+  | { readonly type: "hello" }
   | { readonly type: "view"; readonly view: IncomingView }
-  | { readonly type: "ops"; readonly ops: readonly unknown[] }
-  | { readonly type: "approval_requested"; readonly approval: ApprovalItem }
+  | { readonly type: "ops" }
   | { readonly type: "takeover_requested"; readonly takeover: TakeoverItem }
-  | { readonly type: "result"; readonly id: string; readonly result: unknown }
-  | { readonly type: "error"; readonly id?: string; readonly message: string };
+  | { readonly type: "result" }
+  | { readonly type: "error"; readonly message: string };

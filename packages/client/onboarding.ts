@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import {
   encodeFormBody,
-  listCloudflareAccountIds,
+  listCloudflareAccounts,
 } from "./cloudflare-device-auth";
 import { randomBase64Url, sha256Base64Url } from "./pkce";
 import { AuthConfigResponseSchema } from "./protocol";
@@ -35,11 +35,17 @@ type WorkerStatus =
       readonly clientId: string;
     };
 
+export type DiscoveredWorker = {
+  readonly accountId: string;
+  readonly accountName: string;
+  readonly baseUrl: string;
+};
+
 type WorkerDiscoveryResult =
   | {
       readonly kind: "found";
-      readonly accountId: string;
-      readonly baseUrl: string;
+      readonly matches: readonly DiscoveredWorker[];
+      readonly accountCount: number;
     }
   | { readonly kind: "not_deployed"; readonly accountId: string }
   | { readonly kind: "error"; readonly message: string };
@@ -318,20 +324,23 @@ export async function discoverCloudflareWorker(
 ): Promise<WorkerDiscoveryResult> {
   const headers = { Authorization: `Bearer ${cfApiToken.trim()}` };
   try {
-    const listed = await listCloudflareAccountIds(headers);
+    const listed = await listCloudflareAccounts(headers);
     if (!listed.ok) {
       return { kind: "error", message: listed.message };
     }
-    const accountIds = listed.accountIds;
+    const accounts = listed.accounts;
     const checks = await Promise.all(
-      accountIds.map(async (accountId) => {
-        const cleanAccount = encodeURIComponent(accountId);
+      accounts.map(async (account) => {
+        const cleanAccount = encodeURIComponent(account.id);
         const scriptRes = await fetch(
           `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/scripts/${DEFAULT_WORKER_NAME}`,
           { headers },
         );
         if (scriptRes.status === 404) {
-          return { kind: "not_deployed" as const, accountId };
+          return { kind: "not_deployed" as const, accountId: account.id };
+        }
+        if (scriptRes.status === 403) {
+          return { kind: "forbidden" as const };
         }
         if (!scriptRes.ok) {
           return {
@@ -343,6 +352,9 @@ export async function discoverCloudflareWorker(
           `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/subdomain`,
           { headers },
         );
+        if (subRes.status === 403) {
+          return { kind: "forbidden" as const };
+        }
         if (!subRes.ok) {
           return {
             kind: "error" as const,
@@ -358,33 +370,37 @@ export async function discoverCloudflareWorker(
         }
         return {
           kind: "found" as const,
-          accountId,
+          accountId: account.id,
+          accountName: account.name,
           baseUrl: `https://${DEFAULT_WORKER_NAME}.${parsed.data.result.subdomain}.workers.dev`,
         };
       }),
     );
-    const found = checks.filter((item) => item.kind === "found");
-    if (found.length > 1) {
-      return {
-        kind: "error",
-        message: "Multiple Cloudflare accounts have this Worker deployed.",
-      };
+    const matches: DiscoveredWorker[] = [];
+    for (const item of checks) {
+      if (item.kind === "found") {
+        matches.push({
+          accountId: item.accountId,
+          accountName: item.accountName,
+          baseUrl: item.baseUrl,
+        });
+      }
+    }
+    if (matches.length > 0) {
+      return { kind: "found", matches, accountCount: accounts.length };
     }
     const firstError = checks.find((item) => item.kind === "error");
     if (firstError) {
       return firstError;
     }
-    if (found[0]) {
-      return found[0];
+    const deployable = checks.find((item) => item.kind === "not_deployed");
+    if (deployable) {
+      return { kind: "not_deployed", accountId: deployable.accountId };
     }
-    const firstAccountId = accountIds[0];
-    if (!firstAccountId) {
-      return {
-        kind: "error",
-        message: "No Cloudflare account found for this session.",
-      };
-    }
-    return { kind: "not_deployed", accountId: firstAccountId };
+    return {
+      kind: "error",
+      message: "No accessible Cloudflare account found for Workers.",
+    };
   } catch (thrown) {
     return {
       kind: "error",

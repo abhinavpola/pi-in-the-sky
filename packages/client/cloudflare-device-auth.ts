@@ -31,23 +31,38 @@ const DeviceTokenErrorSchema = z.object({
   error_description: z.string().optional(),
 });
 
+const ResultInfoSchema = z
+  .object({
+    total_pages: z.number().int().positive().optional(),
+  })
+  .optional();
+
 const MembershipsResponseSchema = z.object({
   result: z.array(
     z.object({
       account: z.object({
         id: z.string().min(1),
+        name: z.string().optional(),
       }),
     }),
   ),
+  result_info: ResultInfoSchema,
 });
 
 const AccountsResponseSchema = z.object({
   result: z.array(
     z.object({
       id: z.string().min(1),
+      name: z.string().optional(),
     }),
   ),
+  result_info: ResultInfoSchema,
 });
+
+export type CloudflareAccount = {
+  readonly id: string;
+  readonly name: string;
+};
 
 export type CloudflareDeviceAuth = {
   readonly deviceCode: string;
@@ -74,46 +89,72 @@ export function encodeFormBody(entries: Record<string, string>): string {
     .join("&");
 }
 
-export async function listCloudflareAccountIds(
+export async function listCloudflareAccounts(
   headers: Record<string, string>,
 ): Promise<
-  | { readonly ok: true; readonly accountIds: readonly string[] }
+  | { readonly ok: true; readonly accounts: readonly CloudflareAccount[] }
   | { readonly ok: false; readonly message: string }
 > {
-  const seen = new Set<string>();
-  const membershipsRes = await fetch(
-    "https://api.cloudflare.com/client/v4/memberships",
-    { headers },
-  );
-  if (membershipsRes.ok) {
+  const seen = new Map<string, CloudflareAccount>();
+  let page = 1;
+  let totalPages = 1;
+  while (page <= totalPages && page <= 20) {
+    const membershipsRes = await fetch(
+      `https://api.cloudflare.com/client/v4/memberships?page=${page}&per_page=50`,
+      { headers },
+    );
+    if (!membershipsRes.ok) {
+      break;
+    }
     const parsed = MembershipsResponseSchema.safeParse(
       await membershipsRes.json(),
     );
-    if (parsed.success) {
-      for (const item of parsed.data.result) {
-        seen.add(item.account.id);
+    if (!parsed.success) {
+      break;
+    }
+    for (const item of parsed.data.result) {
+      if (!seen.has(item.account.id)) {
+        seen.set(item.account.id, {
+          id: item.account.id,
+          name: item.account.name?.trim() || item.account.id,
+        });
       }
     }
+    totalPages = parsed.data.result_info?.total_pages ?? 1;
+    page += 1;
   }
   if (seen.size > 0) {
-    return { ok: true, accountIds: [...seen] };
+    return { ok: true, accounts: [...seen.values()] };
   }
-  const accountsRes = await fetch(
-    "https://api.cloudflare.com/client/v4/accounts",
-    { headers },
-  );
-  if (!accountsRes.ok) {
-    return {
-      ok: false,
-      message: `Could not read Cloudflare accounts (HTTP ${accountsRes.status})`,
-    };
-  }
-  const accountsParsed = AccountsResponseSchema.safeParse(
-    await accountsRes.json(),
-  );
-  const accounts = accountsParsed.success ? accountsParsed.data.result : [];
-  for (const account of accounts) {
-    seen.add(account.id);
+  page = 1;
+  totalPages = 1;
+  while (page <= totalPages && page <= 20) {
+    const accountsRes = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts?page=${page}&per_page=50`,
+      { headers },
+    );
+    if (!accountsRes.ok) {
+      return {
+        ok: false,
+        message: `Could not read Cloudflare accounts (HTTP ${accountsRes.status})`,
+      };
+    }
+    const accountsParsed = AccountsResponseSchema.safeParse(
+      await accountsRes.json(),
+    );
+    if (!accountsParsed.success) {
+      break;
+    }
+    for (const account of accountsParsed.data.result) {
+      if (!seen.has(account.id)) {
+        seen.set(account.id, {
+          id: account.id,
+          name: account.name?.trim() || account.id,
+        });
+      }
+    }
+    totalPages = accountsParsed.data.result_info?.total_pages ?? 1;
+    page += 1;
   }
   if (seen.size === 0) {
     return {
@@ -121,7 +162,7 @@ export async function listCloudflareAccountIds(
       message: "No Cloudflare account found for this session.",
     };
   }
-  return { ok: true, accountIds: [...seen] };
+  return { ok: true, accounts: [...seen.values()] };
 }
 
 function isTrustedVerificationUrl(raw: string): boolean {

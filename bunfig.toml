@@ -1,0 +1,10 @@
+[lint]
+plugins = ["./lint/no-comments.js"]
+
+[lint.rules]
+"local/no-comments" = "error"
+"max-lines" = ["error", { max = 500 }]
+
+[fmt]
+sortImports = true
+sortPackageJson = true

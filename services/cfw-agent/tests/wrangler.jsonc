@@ -1,0 +1,27 @@
+{
+  "name": "pi-in-the-sky-agent-test",
+  "main": "./worker.ts",
+  "compatibility_date": "2026-11-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "AUTH_TOKEN": "test-secret-token",
+    "GMAIL_ACCESS_TOKEN": "gmail-test-token",
+    "GOOGLE_CALENDAR_ACCESS_TOKEN": "calendar-test-token",
+    "BROWSER_RUN_ENDPOINT": "https://browser.example.test",
+    "BROWSER_RUN_TOKEN": "browser-test-token",
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PersonalAgent",
+        "class_name": "TestPersonalAgent",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TestPersonalAgent"],
+    },
+  ],
+}

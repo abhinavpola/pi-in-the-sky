@@ -1,0 +1,19 @@
+{
+  "name": "@pi-in-the-sky/macos",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "macos": "react-native run-macos",
+    "start": "react-native start"
+  },
+  "dependencies": {
+    "@pi-in-the-sky/result-monad": "workspace:*",
+    "react": "19.2.4",
+    "react-native": "0.83.10",
+    "react-native-macos": "0.83.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14"
+  }
+}

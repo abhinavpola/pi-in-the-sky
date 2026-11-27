@@ -1,0 +1,27 @@
+{
+  "name": "@pi-in-the-sky/cfw-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "test": "vitest run --config tests/vitest.config.ts",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.6.1",
+    "@earendil-works/pi-ai": "1.6.1",
+    "@earendil-works/pi-durable": "1.6.1",
+    "@earendil-works/pi-schema": "1.6.1",
+    "@pi-in-the-sky/result-monad": "workspace:*",
+    "agents": "0.34.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.9.1",
+    "@cloudflare/workers-types": "latest",
+    "vitest": "4.1.11",
+    "wrangler": "latest"
+  }
+}

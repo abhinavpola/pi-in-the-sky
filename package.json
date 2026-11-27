@@ -1,13 +1,20 @@
 {
   "name": "pi-in-the-sky",
-  "module": "index.ts",
-  "type": "module",
   "private": true,
+  "workspaces": [
+    "packages/*",
+    "services/*",
+    "projects/macos"
+  ],
+  "type": "module",
   "scripts": {
-    "typecheck": "bun check"
+    "fallow": "fallow dead-code --fail-on-issues && fallow dupes",
+    "test": "bun run --filter '@pi-in-the-sky/cfw-agent' test",
+    "typecheck": "bun check -b"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "fallow": "^3.50.0"
   },
   "peerDependencies": {
     "typescript": "^7"

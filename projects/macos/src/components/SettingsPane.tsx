@@ -4,87 +4,31 @@ import {
   validateBaseUrl,
 } from "@pi-in-the-sky/client/agent-client";
 import {
-  buildAccessAuthorizeUrl,
-  createPkceSession,
   fetchWorkerStatus,
-  handleOAuthCallbackUrl,
-  type PkceSession,
   refreshAccessToken,
 } from "@pi-in-the-sky/client/onboarding";
-import { useEffect, useState } from "react";
-import {
-  Linking,
-  Pressable,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
+import { useState } from "react";
+import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+
+import { signInWithCloudflareAccess } from "../native";
 
 type SettingsPaneProps = {
   readonly config: ConnectionConfig;
   readonly connectionState: ConnectionState;
   readonly onSave: (config: ConnectionConfig) => void;
+  readonly onSignOut: () => void;
 };
 
 export function SettingsPane({
   config,
   connectionState,
   onSave,
+  onSignOut,
 }: SettingsPaneProps) {
   const [baseUrl, setBaseUrl] = useState(config.baseUrl);
   const [authToken, setAuthToken] = useState(config.authToken);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [pendingAuth, setPendingAuth] = useState<{
-    readonly baseUrl: string;
-    readonly teamDomain: string;
-    readonly clientId: string;
-    readonly pkce: PkceSession;
-  } | null>(null);
-
-  useEffect(() => {
-    if (!pendingAuth) {
-      return;
-    }
-    const subscription = Linking.addEventListener("url", ({ url }) => {
-      setStatusMessage("Exchanging Cloudflare Access authorization code...");
-      void handleOAuthCallbackUrl(
-        url,
-        pendingAuth.teamDomain,
-        pendingAuth.clientId,
-        pendingAuth.pkce,
-      ).then((result) => {
-        switch (result.kind) {
-          case "ignore":
-            return;
-          case "error":
-            setPendingAuth(null);
-            setStatusMessage(null);
-            setValidationError(result.message);
-            return;
-          case "exchanged":
-            setPendingAuth(null);
-            setAuthToken(result.accessToken);
-            setStatusMessage("Signed in with Cloudflare Access.");
-            onSave({
-              baseUrl: pendingAuth.baseUrl,
-              authToken: result.accessToken,
-              refreshToken: result.refreshToken,
-              accessTeamDomain: pendingAuth.teamDomain,
-              accessClientId: pendingAuth.clientId,
-            });
-            return;
-          default: {
-            result satisfies never;
-          }
-        }
-      });
-    });
-    return () => {
-      subscription.remove();
-    };
-  }, [pendingAuth, onSave]);
 
   const handleSave = () => {
     const validated = validateBaseUrl(baseUrl);
@@ -128,19 +72,20 @@ export function SettingsPane({
         );
         return;
       case "live_oauth_ready": {
-        const pkce = createPkceSession();
-        setPendingAuth({
+        const result = await signInWithCloudflareAccess({
           baseUrl: status.baseUrl,
           teamDomain: status.teamDomain,
           clientId: status.clientId,
-          pkce,
+          onStatus: setStatusMessage,
         });
-        await Linking.openURL(
-          buildAccessAuthorizeUrl(status.teamDomain, status.clientId, pkce),
-        );
-        setStatusMessage(
-          "Waiting for Cloudflare Access sign-in callback (piinthesky://auth/callback)...",
-        );
+        if (!result.ok) {
+          setStatusMessage(null);
+          setValidationError(result.error);
+          return;
+        }
+        setAuthToken(result.value.authToken);
+        setStatusMessage("Signed in with Cloudflare Access.");
+        onSave(result.value);
         return;
       }
       default: {
@@ -232,9 +177,14 @@ export function SettingsPane({
         <Text style={styles.error}>{validationError}</Text>
       ) : null}
 
-      <Pressable style={styles.button} onPress={handleSave}>
-        <Text style={styles.buttonText}>Save & Reconnect</Text>
-      </Pressable>
+      <View style={styles.row}>
+        <Pressable style={styles.button} onPress={handleSave}>
+          <Text style={styles.buttonText}>Save & Reconnect</Text>
+        </Pressable>
+        <Pressable style={styles.signOutButton} onPress={onSignOut}>
+          <Text style={styles.buttonText}>Sign Out</Text>
+        </Pressable>
+      </View>
     </View>
   );
 }
@@ -271,6 +221,14 @@ const styles = StyleSheet.create({
   button: {
     backgroundColor: "#2563eb",
     paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignSelf: "flex-start",
+    marginTop: 8,
+  },
+  signOutButton: {
+    backgroundColor: "#991b1b",
+    paddingHorizontal: 14,
     paddingVertical: 10,
     borderRadius: 8,
     alignSelf: "flex-start",

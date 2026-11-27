@@ -17,13 +17,17 @@ import {
 
 export type ConnectionState = "disconnected" | "connecting" | "connected";
 
-export type ConnectionConfig = {
-  readonly baseUrl: string;
-  readonly authToken: string;
-  readonly refreshToken?: string;
-  readonly accessTeamDomain?: string;
-  readonly accessClientId?: string;
-};
+export const ConnectionConfigSchema = z
+  .object({
+    baseUrl: z.string(),
+    authToken: z.string(),
+    refreshToken: z.string().optional(),
+    accessTeamDomain: z.string().optional(),
+    accessClientId: z.string().optional(),
+  })
+  .readonly();
+
+export type ConnectionConfig = z.infer<typeof ConnectionConfigSchema>;
 
 type ClientHandlers = {
   readonly onConnectionChange: (state: ConnectionState) => void;

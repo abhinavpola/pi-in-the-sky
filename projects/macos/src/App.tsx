@@ -15,6 +15,11 @@ import { MemoryPane } from "./components/MemoryPane";
 import { OnboardingView } from "./components/OnboardingView";
 import { SettingsPane } from "./components/SettingsPane";
 import { StreamView } from "./components/StreamView";
+import {
+  clearStoredConnectionConfig,
+  loadStoredConnectionConfig,
+  saveStoredConnectionConfig,
+} from "./native";
 
 type ViewMode = "onboarding" | "stream" | "memory" | "settings";
 
@@ -56,11 +61,55 @@ export function App() {
   );
 
   useEffect(() => {
-    client.connect();
+    let active = true;
+    void loadStoredConnectionConfig().then((result) => {
+      if (!active) {
+        return;
+      }
+      if (!result.ok) {
+        setErrorBanner(result.error);
+        client.connect();
+        return;
+      }
+      if (result.value) {
+        setConfig(result.value);
+        client.updateConfig(result.value);
+        if (result.value.authToken.trim().length > 0) {
+          setViewMode("stream");
+        }
+        return;
+      }
+      client.connect();
+    });
     return () => {
+      active = false;
       client.disconnect();
     };
   }, [client]);
+
+  const applyAndPersistConfig = (next: ConnectionConfig) => {
+    setConfig(next);
+    setErrorBanner(null);
+    client.updateConfig(next);
+    setViewMode("stream");
+    void saveStoredConnectionConfig(next).then((saved) => {
+      if (!saved.ok) {
+        setErrorBanner(saved.error);
+      }
+    });
+  };
+
+  const handleSignOut = () => {
+    setConfig(DEFAULT_CONFIG);
+    setErrorBanner(null);
+    client.updateConfig(DEFAULT_CONFIG);
+    setViewMode("onboarding");
+    void clearStoredConnectionConfig().then((cleared) => {
+      if (!cleared.ok) {
+        setErrorBanner(cleared.error);
+      }
+    });
+  };
 
   const handleResumeTakeover = (id: string) => {
     client.resumeTakeover(id);
@@ -86,12 +135,7 @@ export function App() {
         return (
           <OnboardingView
             initialBaseUrl={config.baseUrl}
-            onComplete={(next) => {
-              setConfig(next);
-              setErrorBanner(null);
-              client.updateConfig(next);
-              setViewMode("stream");
-            }}
+            onComplete={applyAndPersistConfig}
             onSkip={() => setViewMode("stream")}
           />
         );
@@ -125,12 +169,8 @@ export function App() {
           <SettingsPane
             config={config}
             connectionState={connectionState}
-            onSave={(next) => {
-              setConfig(next);
-              setErrorBanner(null);
-              client.updateConfig(next);
-              setViewMode("stream");
-            }}
+            onSave={applyAndPersistConfig}
+            onSignOut={handleSignOut}
           />
         );
       default: {

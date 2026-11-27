@@ -3,17 +3,13 @@ import {
   validateBaseUrl,
 } from "@pi-in-the-sky/client/agent-client";
 import {
-  buildAccessAuthorizeUrl,
-  createPkceSession,
   DEPLOY_TO_CLOUDFLARE_URL,
   discoverCloudflareWorker,
   fetchWorkerStatus,
-  handleOAuthCallbackUrl,
-  type PkceSession,
   provisionWorkerSecrets,
 } from "@pi-in-the-sky/client/onboarding";
 import { LOCAL_DEV_AUTH_TOKEN } from "@pi-in-the-sky/client/protocol";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Linking,
   Pressable,
@@ -22,6 +18,8 @@ import {
   TextInput,
   View,
 } from "react-native";
+
+import { signInWithCloudflareAccess } from "../native";
 
 type OnboardingStep = "discover" | "deploy" | "access_login";
 
@@ -43,47 +41,8 @@ export function OnboardingView({
   const [workerUrl, setWorkerUrl] = useState(initialBaseUrl);
   const [teamDomain, setTeamDomain] = useState("");
   const [clientId, setClientId] = useState("");
-  const [pkceSession, setPkceSession] = useState<PkceSession | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (step !== "access_login" || !teamDomain || !clientId || !pkceSession) {
-      return;
-    }
-    const subscription = Linking.addEventListener("url", ({ url }) => {
-      setStatusMessage("Exchanging Cloudflare Access authorization code...");
-      void handleOAuthCallbackUrl(url, teamDomain, clientId, pkceSession).then(
-        (result) => {
-          switch (result.kind) {
-            case "ignore":
-              return;
-            case "error":
-              setPkceSession(null);
-              setStatusMessage(null);
-              setErrorText(result.message);
-              return;
-            case "exchanged":
-              setPkceSession(null);
-              onComplete({
-                baseUrl: workerUrl,
-                authToken: result.accessToken,
-                refreshToken: result.refreshToken,
-                accessTeamDomain: teamDomain,
-                accessClientId: clientId,
-              });
-              return;
-            default: {
-              result satisfies never;
-            }
-          }
-        },
-      );
-    });
-    return () => {
-      subscription.remove();
-    };
-  }, [step, teamDomain, clientId, pkceSession, workerUrl, onComplete]);
 
   const checkLiveness = async (candidateUrl: string) => {
     const validated = validateBaseUrl(candidateUrl);
@@ -176,17 +135,19 @@ export function OnboardingView({
 
   const handleAccessLogin = async () => {
     setErrorText(null);
-    const nextPkce = createPkceSession();
-    setPkceSession(nextPkce);
-    const authorizeUrl = buildAccessAuthorizeUrl(
+    const result = await signInWithCloudflareAccess({
+      baseUrl: workerUrl,
       teamDomain,
       clientId,
-      nextPkce,
-    );
-    await Linking.openURL(authorizeUrl);
-    setStatusMessage(
-      "Waiting for Cloudflare Access sign-in callback (piinthesky://auth/callback)...",
-    );
+      onStatus: setStatusMessage,
+    });
+    if (!result.ok) {
+      setStatusMessage(null);
+      setErrorText(result.error);
+      return;
+    }
+    setStatusMessage(null);
+    onComplete(result.value);
   };
 
   const renderStep = (current: OnboardingStep) => {

@@ -30,6 +30,53 @@ export const onboardingStyles = StyleSheet.create({
     color: THEME.textSecondary,
     fontSize: 14,
   },
+  stepper: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+  },
+  stepPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  stepBadge: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: THEME.inputBg,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stepBadgeActive: {
+    backgroundColor: THEME.blue,
+  },
+  stepBadgeDone: {
+    backgroundColor: THEME.green,
+  },
+  stepBadgeText: {
+    color: THEME.textSecondary,
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  stepBadgeTextActive: {
+    color: THEME.white,
+  },
+  stepLabel: {
+    color: THEME.textTertiary,
+    fontSize: 13,
+    fontWeight: "500",
+  },
+  stepLabelActive: {
+    color: THEME.textPrimary,
+    fontWeight: "600",
+  },
+  stepDivider: {
+    width: 20,
+    height: 1,
+    backgroundColor: THEME.border,
+  },
   card: {
     backgroundColor: THEME.surface,
     borderRadius: 14,

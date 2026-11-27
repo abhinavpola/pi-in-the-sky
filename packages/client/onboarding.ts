@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+import {
+  encodeFormBody,
+  listCloudflareAccountIds,
+} from "./cloudflare-device-auth";
 import { randomBase64Url, sha256Base64Url } from "./pkce";
 import { AuthConfigResponseSchema } from "./protocol";
 
@@ -9,14 +13,6 @@ const DEFAULT_WORKER_NAME = "pi-in-the-sky-agent";
 
 export const DEPLOY_TO_CLOUDFLARE_URL = `https://deploy.workers.cloudflare.com/?url=${encodeURIComponent(WORKER_REPO_URL)}`;
 const ACCESS_REDIRECT_URI = "piinthesky://auth/callback";
-
-const AccountsResponseSchema = z.object({
-  result: z.array(
-    z.object({
-      id: z.string().min(1),
-    }),
-  ),
-});
 
 const SubdomainResponseSchema = z.object({
   result: z.object({
@@ -68,15 +64,6 @@ type OAuthCallbackResult =
 function normalizeTeamOrigin(teamDomain: string): string {
   const trimmed = teamDomain.trim().replace(/\/$/, "");
   return trimmed.startsWith("https://") ? trimmed : `https://${trimmed}`;
-}
-
-function encodeFormBody(entries: Record<string, string>): string {
-  return Object.entries(entries)
-    .map(
-      ([key, value]) =>
-        `${encodeURIComponent(key)}=${encodeURIComponent(value)}`,
-    )
-    .join("&");
 }
 
 function parseQueryParams(url: string): Map<string, string> {
@@ -331,35 +318,20 @@ export async function discoverCloudflareWorker(
 ): Promise<WorkerDiscoveryResult> {
   const headers = { Authorization: `Bearer ${cfApiToken.trim()}` };
   try {
-    const accountsRes = await fetch(
-      "https://api.cloudflare.com/client/v4/accounts",
-      { headers },
-    );
-    if (!accountsRes.ok) {
-      return {
-        kind: "error",
-        message: `Could not read Cloudflare accounts (HTTP ${accountsRes.status})`,
-      };
+    const listed = await listCloudflareAccountIds(headers);
+    if (!listed.ok) {
+      return { kind: "error", message: listed.message };
     }
-    const accountsParsed = AccountsResponseSchema.safeParse(
-      await accountsRes.json(),
-    );
-    const accounts = accountsParsed.success ? accountsParsed.data.result : [];
-    if (accounts.length === 0) {
-      return {
-        kind: "error",
-        message: "No Cloudflare account found for this token.",
-      };
-    }
+    const accountIds = listed.accountIds;
     const checks = await Promise.all(
-      accounts.map(async (account) => {
-        const cleanAccount = encodeURIComponent(account.id);
+      accountIds.map(async (accountId) => {
+        const cleanAccount = encodeURIComponent(accountId);
         const scriptRes = await fetch(
           `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/scripts/${DEFAULT_WORKER_NAME}`,
           { headers },
         );
         if (scriptRes.status === 404) {
-          return { kind: "not_deployed" as const, accountId: account.id };
+          return { kind: "not_deployed" as const, accountId };
         }
         if (!scriptRes.ok) {
           return {
@@ -386,7 +358,7 @@ export async function discoverCloudflareWorker(
         }
         return {
           kind: "found" as const,
-          accountId: account.id,
+          accountId,
           baseUrl: `https://${DEFAULT_WORKER_NAME}.${parsed.data.result.subdomain}.workers.dev`,
         };
       }),
@@ -395,8 +367,7 @@ export async function discoverCloudflareWorker(
     if (found.length > 1) {
       return {
         kind: "error",
-        message:
-          "Multiple Cloudflare accounts have this Worker deployed. Use an account-scoped token.",
+        message: "Multiple Cloudflare accounts have this Worker deployed.",
       };
     }
     const firstError = checks.find((item) => item.kind === "error");
@@ -406,14 +377,14 @@ export async function discoverCloudflareWorker(
     if (found[0]) {
       return found[0];
     }
-    const firstAccount = accounts[0];
-    if (!firstAccount) {
+    const firstAccountId = accountIds[0];
+    if (!firstAccountId) {
       return {
         kind: "error",
-        message: "No Cloudflare account found for this token.",
+        message: "No Cloudflare account found for this session.",
       };
     }
-    return { kind: "not_deployed", accountId: firstAccount.id };
+    return { kind: "not_deployed", accountId: firstAccountId };
   } catch (thrown) {
     return {
       kind: "error",

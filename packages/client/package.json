@@ -6,7 +6,8 @@
   "exports": {
     "./protocol": "./protocol.ts",
     "./agent-client": "./agent-client.ts",
-    "./onboarding": "./onboarding.ts"
+    "./onboarding": "./onboarding.ts",
+    "./cloudflare-device-auth": "./cloudflare-device-auth.ts"
   },
   "dependencies": {
     "@pi-in-the-sky/result-monad": "workspace:*",

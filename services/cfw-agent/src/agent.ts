@@ -241,13 +241,14 @@ export class PersonalAgent extends DurableObject<Env> {
     if (!record) {
       throw new Error(`Approval ${approvalId} not found`);
     }
-    const updated = this.approvals.markResolved(approvalId, approved, note);
+    const payload = note !== undefined ? { approved, note } : { approved };
     const delivered = await this.harness.signal(
       record.taskId,
       ApprovalSignal,
       approvalId,
-      { approved, note },
+      payload,
     );
+    const updated = this.approvals.markResolved(approvalId, approved, note);
     return {
       approvalId,
       status: updated?.status ?? record.status,
@@ -266,13 +267,15 @@ export class PersonalAgent extends DurableObject<Env> {
     if (!record) {
       throw new Error(`Takeover ${takeoverId} not found`);
     }
-    this.browser.markResumed(takeoverId);
+    const payload =
+      note !== undefined ? { resumed: true, note } : { resumed: true };
     const delivered = await this.harness.signal(
       record.taskId,
       BrowserTakeoverSignal,
       takeoverId,
-      { resumed: true, note },
+      payload,
     );
+    this.browser.markResumed(takeoverId);
     return {
       takeoverId,
       delivered,

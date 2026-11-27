@@ -26,7 +26,7 @@ function toFtsQuery(raw: string): string {
   return raw
     .trim()
     .split(/\s+/)
-    .map((token) => token.replace(/[^a-zA-Z0-9_-]/g, ""))
+    .map((token) => token.replace(/[^\p{L}\p{N}_-]/gu, ""))
     .filter(Boolean)
     .map((token) => `"${token}"*`)
     .join(" ");

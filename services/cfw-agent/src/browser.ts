@@ -70,26 +70,29 @@ export class BrowserStore {
     `);
   }
 
-  getSessionId(): string | undefined {
+  getSessionId(conversationId: string): string | undefined {
     const row = this.#sql
       .exec<{ value: string }>(
-        "SELECT value FROM browser_session_state WHERE key = 'session_id'",
+        "SELECT value FROM browser_session_state WHERE key = ?",
+        `session_id:${conversationId}`,
       )
       .toArray()[0];
     return row?.value;
   }
 
-  setSessionId(sessionId: string): void {
+  setSessionId(conversationId: string, sessionId: string): void {
     this.#sql.exec(
-      `INSERT INTO browser_session_state (key, value) VALUES ('session_id', ?)
+      `INSERT INTO browser_session_state (key, value) VALUES (?, ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      `session_id:${conversationId}`,
       sessionId,
     );
   }
 
-  clearSessionId(): void {
+  clearSessionId(conversationId: string): void {
     this.#sql.exec(
-      "DELETE FROM browser_session_state WHERE key = 'session_id'",
+      "DELETE FROM browser_session_state WHERE key = ?",
+      `session_id:${conversationId}`,
     );
   }
 
@@ -168,11 +171,24 @@ export class BrowserStore {
 }
 
 type BrowserActionRequest =
-  | { readonly action: "navigate"; readonly url: string }
-  | { readonly action: "snapshot"; readonly selector?: string }
-  | { readonly action: "click"; readonly selector: string }
+  | {
+      readonly action: "navigate";
+      readonly conversationId: string;
+      readonly url: string;
+    }
+  | {
+      readonly action: "snapshot";
+      readonly conversationId: string;
+      readonly selector?: string;
+    }
+  | {
+      readonly action: "click";
+      readonly conversationId: string;
+      readonly selector: string;
+    }
   | {
       readonly action: "fill";
+      readonly conversationId: string;
       readonly selector: string;
       readonly value: string;
     };
@@ -184,17 +200,18 @@ export type BrowserExecutor = (
 async function openOrReuseBrowser(
   binding: BrowserWorker,
   store: BrowserStore,
+  conversationId: string,
 ): Promise<Browser> {
-  const existingId = store.getSessionId();
+  const existingId = store.getSessionId(conversationId);
   if (existingId) {
     try {
       return await puppeteer.connect(binding, existingId);
     } catch {
-      store.clearSessionId();
+      store.clearSessionId(conversationId);
     }
   }
   const browser = await puppeteer.launch(binding, { keep_alive: 60_000 });
-  store.setSessionId(browser.sessionId());
+  store.setSessionId(conversationId, browser.sessionId());
   return browser;
 }
 
@@ -216,7 +233,7 @@ export function createPuppeteerBrowserExecutor(
     }
     let browser: Browser | undefined;
     try {
-      browser = await openOrReuseBrowser(binding, store);
+      browser = await openOrReuseBrowser(binding, store, req.conversationId);
       const page = await activePage(browser);
       switch (req.action) {
         case "navigate": {
@@ -228,6 +245,8 @@ export function createPuppeteerBrowserExecutor(
             ? await page.$eval(req.selector, (el) => el.textContent ?? "")
             : await page.content();
           const text = html
+            .replace(/<script[\s\S]*?<\/script>/gi, " ")
+            .replace(/<style[\s\S]*?<\/style>/gi, " ")
             .replace(/<[^>]+>/g, " ")
             .replace(/\s+/g, " ")
             .trim()
@@ -243,7 +262,8 @@ export function createPuppeteerBrowserExecutor(
           return ok({ clicked: req.selector, url: page.url() });
         }
         case "fill": {
-          await page.click(req.selector);
+          await page.click(req.selector, { clickCount: 3 });
+          await page.keyboard.press("Backspace");
           await page.type(req.selector, req.value);
           return ok({ filled: req.selector, url: page.url() });
         }
@@ -295,8 +315,14 @@ export function createBrowserExtension(
     description: "Navigate the cloud browser session to a URL.",
     parameters: NavigateSchema,
     replay: "safe",
-    execute: async ({ url }) =>
-      toToolResult(await executeAction({ action: "navigate", url })),
+    execute: async ({ url }, api) =>
+      toToolResult(
+        await executeAction({
+          action: "navigate",
+          conversationId: String(api.conversationId),
+          url,
+        }),
+      ),
   };
 
   const snapshotTool: ToolRegistration<typeof SnapshotSchema> = {
@@ -305,8 +331,14 @@ export function createBrowserExtension(
       "Capture a structured text snapshot of the current browser page.",
     parameters: SnapshotSchema,
     replay: "safe",
-    execute: async ({ selector }) =>
-      toToolResult(await executeAction({ action: "snapshot", selector })),
+    execute: async ({ selector }, api) =>
+      toToolResult(
+        await executeAction({
+          action: "snapshot",
+          conversationId: String(api.conversationId),
+          selector,
+        }),
+      ),
   };
 
   const clickTool: ToolRegistration<typeof ClickSchema> = {
@@ -314,8 +346,14 @@ export function createBrowserExtension(
     description: "Click an element on the current browser page by selector.",
     parameters: ClickSchema,
     replay: "unsafe",
-    execute: async ({ selector }) =>
-      toToolResult(await executeAction({ action: "click", selector })),
+    execute: async ({ selector }, api) =>
+      toToolResult(
+        await executeAction({
+          action: "click",
+          conversationId: String(api.conversationId),
+          selector,
+        }),
+      ),
   };
 
   const fillTool: ToolRegistration<typeof FillSchema> = {
@@ -323,8 +361,15 @@ export function createBrowserExtension(
     description: "Fill an input field on the current browser page.",
     parameters: FillSchema,
     replay: "unsafe",
-    execute: async ({ selector, value }) =>
-      toToolResult(await executeAction({ action: "fill", selector, value })),
+    execute: async ({ selector, value }, api) =>
+      toToolResult(
+        await executeAction({
+          action: "fill",
+          conversationId: String(api.conversationId),
+          selector,
+          value,
+        }),
+      ),
   };
 
   const requestTakeoverTool: ToolRegistration<

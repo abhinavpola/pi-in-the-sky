@@ -10,7 +10,9 @@ import {
   fetchWorkerStatus,
   handleOAuthCallbackUrl,
   type PkceSession,
+  provisionWorkerSecrets,
 } from "@pi-in-the-sky/client/onboarding";
+import { LOCAL_DEV_AUTH_TOKEN } from "@pi-in-the-sky/client/protocol";
 import { useEffect, useState } from "react";
 import {
   Linking,
@@ -37,6 +39,7 @@ export function OnboardingView({
   const [step, setStep] = useState<OnboardingStep>("discover");
   const [cfAccountId, setCfAccountId] = useState("");
   const [cfApiToken, setCfApiToken] = useState("");
+  const [nearAiApiKey, setNearAiApiKey] = useState("");
   const [workerUrl, setWorkerUrl] = useState(initialBaseUrl);
   const [teamDomain, setTeamDomain] = useState("");
   const [clientId, setClientId] = useState("");
@@ -103,7 +106,7 @@ export function OnboardingView({
         onComplete({
           baseUrl: status.baseUrl,
           agentId: "personal",
-          authToken: "",
+          authToken: LOCAL_DEV_AUTH_TOKEN,
         });
         return;
       case "live_oauth_ready":
@@ -130,6 +133,22 @@ export function OnboardingView({
     switch (result.kind) {
       case "found":
         setWorkerUrl(result.baseUrl);
+        if (nearAiApiKey.trim()) {
+          setStatusMessage(
+            "Generating vault key and configuring Worker secrets...",
+          );
+          const provisioned = await provisionWorkerSecrets(
+            cfApiToken,
+            cfAccountId,
+            nearAiApiKey,
+          );
+          if (!provisioned.ok) {
+            setStatusMessage(null);
+            setErrorText(provisioned.error);
+            return;
+          }
+          setNearAiApiKey("");
+        }
         setCfApiToken("");
         await checkLiveness(result.baseUrl);
         return;
@@ -159,7 +178,7 @@ export function OnboardingView({
 
   const handleAccessLogin = async () => {
     setErrorText(null);
-    const nextPkce = await createPkceSession();
+    const nextPkce = createPkceSession();
     setPkceSession(nextPkce);
     const authorizeUrl = buildAccessAuthorizeUrl(
       teamDomain,
@@ -201,6 +220,17 @@ export function OnboardingView({
               onChangeText={setCfApiToken}
               secureTextEntry
               placeholder="Cloudflare OAuth / API token"
+              placeholderTextColor="#64748b"
+            />
+            <Text style={styles.label}>
+              NEAR AI API Key (optional, auto-uploaded to Worker secrets)
+            </Text>
+            <TextInput
+              style={styles.input}
+              value={nearAiApiKey}
+              onChangeText={setNearAiApiKey}
+              secureTextEntry
+              placeholder="sk-..."
               placeholderTextColor="#64748b"
             />
             <Text style={styles.label}>Or Existing Worker URL</Text>

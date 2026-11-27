@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const LOCAL_DEV_AUTH_TOKEN = "pi-in-the-sky-local-dev";
+
 export const ActivityStatusSchema = z.enum([
   "running",
   "waiting_input",

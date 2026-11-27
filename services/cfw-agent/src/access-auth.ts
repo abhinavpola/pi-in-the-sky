@@ -11,6 +11,7 @@ type AccessConfig = {
 type AccessIdentity = {
   readonly sub: string;
   readonly email: string | null;
+  readonly exp: number;
 };
 
 const JwtHeaderSchema = z.object({
@@ -207,6 +208,7 @@ export async function verifyCloudflareAccessJwt(
     return {
       sub: payload.sub,
       email: payload.email ?? null,
+      exp: payload.exp,
     };
   } catch {
     return null;

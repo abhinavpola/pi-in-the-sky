@@ -95,8 +95,15 @@ export function SettingsPane({
       return;
     }
     setValidationError(null);
+    const urlChanged = validated.value !== config.baseUrl;
     onSave({
-      ...config,
+      ...(urlChanged
+        ? {}
+        : {
+            refreshToken: config.refreshToken,
+            accessTeamDomain: config.accessTeamDomain,
+            accessClientId: config.accessClientId,
+          }),
       baseUrl: validated.value,
       agentId: agentId.trim() || "me",
       authToken: authToken.trim(),
@@ -124,7 +131,7 @@ export function SettingsPane({
         );
         return;
       case "live_oauth_ready": {
-        const pkce = await createPkceSession();
+        const pkce = createPkceSession();
         setPendingAuth({
           baseUrl: status.baseUrl,
           teamDomain: status.teamDomain,

@@ -217,9 +217,12 @@ function emitContentBlock(
 
 export function createNearAiProvider(
   resolveApiKey: () => string | undefined,
-  resolveBaseUrl: () => string | undefined,
 ): Provider {
-  const runStream = (model: Model<Api>, context: TranscriptContext) => {
+  const runStream = (
+    model: Model<Api>,
+    context: TranscriptContext,
+    signal?: AbortSignal,
+  ) => {
     const stream = createAssistantMessageEventStream();
     const apiKey = resolveApiKey();
     const messages = toNearMessages(context);
@@ -246,15 +249,18 @@ export function createNearAiProvider(
           await import("@nearai/inference-sdk");
         const client = new NearInferenceClient({
           apiKey,
-          baseUrl: resolveBaseUrl() ?? DEFAULT_NEAR_AI_CLOUD_BASE_URL,
+          baseUrl: DEFAULT_NEAR_AI_CLOUD_BASE_URL,
           e2ee: true,
         });
-        const completion = await client.chat.completions.create({
-          model: model.id,
-          messages,
-          stream: false,
-          ...(tools.length > 0 ? { tools } : {}),
-        });
+        const completion = await client.chat.completions.create(
+          {
+            model: model.id,
+            messages,
+            stream: false,
+            ...(tools.length > 0 ? { tools } : {}),
+          },
+          signal ? { signal } : undefined,
+        );
         await client.verifyResponse(completion.id);
         const choice = completion.choices[0];
         const content: Array<TextContent | ToolCall> = [];
@@ -329,7 +335,9 @@ export function createNearAiProvider(
       },
     },
     getModels: () => [DEFAULT_NEARAI_MODEL],
-    stream: (model, context) => runStream(model, context),
-    streamSimple: (model, context) => runStream(model, context),
+    stream: (model, context, options) =>
+      runStream(model, context, options?.signal),
+    streamSimple: (model, context, options) =>
+      runStream(model, context, options?.signal),
   };
 }

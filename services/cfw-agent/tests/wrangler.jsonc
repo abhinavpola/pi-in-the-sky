@@ -4,14 +4,7 @@
   "compatibility_date": "2026-11-27",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
-    "AUTH_TOKEN": "test-secret-token",
     "VAULT_MASTER_KEY": "test-vault-master-key-32-bytes-minimum",
-    "GMAIL_ACCESS_TOKEN": "gmail-test-token",
-    "GOOGLE_CALENDAR_ACCESS_TOKEN": "calendar-test-token",
-    "GMAIL_API_BASE_URL": "https://gmail.test",
-    "CALENDAR_API_BASE_URL": "https://calendar.test",
-    "BROWSER_RUN_ENDPOINT": "https://browser.test",
-    "BROWSER_RUN_TOKEN": "browser-test-token",
   },
   "durable_objects": {
     "bindings": [

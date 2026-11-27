@@ -1,11 +1,13 @@
 import { z } from "zod";
 
+import { randomBase64Url, sha256Base64Url } from "./pkce";
 import { AuthConfigResponseSchema } from "./protocol";
 
-const REPO_URL = "https://github.com/abhinavpola/pi-in-the-sky";
+const WORKER_REPO_URL =
+  "https://github.com/abhinavpola/pi-in-the-sky/tree/main/services/cfw-agent";
 const DEFAULT_WORKER_NAME = "pi-in-the-sky-agent";
 
-export const DEPLOY_TO_CLOUDFLARE_URL = `https://deploy.workers.cloudflare.com/?url=${encodeURIComponent(REPO_URL)}`;
+export const DEPLOY_TO_CLOUDFLARE_URL = `https://deploy.workers.cloudflare.com/?url=${encodeURIComponent(WORKER_REPO_URL)}`;
 const ACCESS_REDIRECT_URI = "piinthesky://auth/callback";
 
 const SubdomainResponseSchema = z.object({
@@ -99,45 +101,13 @@ export type PkceSession = {
   readonly codeChallenge: string;
 };
 
-const BASE64URL_ALPHABET =
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
-function toBase64Url(bytes: Uint8Array): string {
-  let out = "";
-  for (let i = 0; i < bytes.length; i += 3) {
-    const a = bytes[i] ?? 0;
-    const b = bytes[i + 1];
-    const c = bytes[i + 2];
-    const n = (a << 16) | ((b ?? 0) << 8) | (c ?? 0);
-    out += BASE64URL_ALPHABET[(n >> 18) & 63];
-    out += BASE64URL_ALPHABET[(n >> 12) & 63];
-    if (b !== undefined) {
-      out += BASE64URL_ALPHABET[(n >> 6) & 63];
-    }
-    if (c !== undefined) {
-      out += BASE64URL_ALPHABET[n & 63];
-    }
-  }
-  return out;
-}
-
-function randomBase64Url(byteLength: number): string {
-  const bytes = new Uint8Array(byteLength);
-  crypto.getRandomValues(bytes);
-  return toBase64Url(bytes);
-}
-
-export async function createPkceSession(): Promise<PkceSession> {
+export function createPkceSession(): PkceSession {
   const state = randomBase64Url(32);
   const codeVerifier = randomBase64Url(32);
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(codeVerifier),
-  );
   return {
     state,
     codeVerifier,
-    codeChallenge: toBase64Url(new Uint8Array(digest)),
+    codeChallenge: sha256Base64Url(codeVerifier),
   };
 }
 
@@ -391,6 +361,53 @@ export async function discoverCloudflareWorker(
     return {
       kind: "error",
       message: thrown instanceof Error ? thrown.message : String(thrown),
+    };
+  }
+}
+
+export async function provisionWorkerSecrets(
+  cfApiToken: string,
+  accountId: string,
+  nearAiApiKey: string,
+): Promise<
+  { readonly ok: true } | { readonly ok: false; readonly error: string }
+> {
+  const cleanAccount = encodeURIComponent(accountId.trim());
+  const endpoint = `https://api.cloudflare.com/client/v4/accounts/${cleanAccount}/workers/scripts/${DEFAULT_WORKER_NAME}/secrets`;
+  const headers = {
+    Authorization: `Bearer ${cfApiToken.trim()}`,
+    "Content-Type": "application/json",
+  };
+  const secrets = [
+    {
+      name: "VAULT_MASTER_KEY",
+      text: randomBase64Url(32),
+      type: "secret_text",
+    },
+    { name: "NEARAI_API_KEY", text: nearAiApiKey.trim(), type: "secret_text" },
+  ];
+  try {
+    const responses = await Promise.all(
+      secrets.map((secret) =>
+        fetch(endpoint, {
+          method: "PUT",
+          headers,
+          body: JSON.stringify(secret),
+        }),
+      ),
+    );
+    const failed = responses.find((res) => !res.ok);
+    if (failed) {
+      return {
+        ok: false,
+        error: `Cloudflare secrets API returned HTTP ${failed.status}`,
+      };
+    }
+    return { ok: true };
+  } catch (thrown) {
+    return {
+      ok: false,
+      error: thrown instanceof Error ? thrown.message : String(thrown),
     };
   }
 }

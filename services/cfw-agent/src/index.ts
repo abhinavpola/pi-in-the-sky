@@ -1,7 +1,10 @@
 import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
-import { AuthConfigResponseSchema } from "@pi-in-the-sky/client/protocol";
+import {
+  AuthConfigResponseSchema,
+  LOCAL_DEV_AUTH_TOKEN,
+} from "@pi-in-the-sky/client/protocol";
 import { PiHarness, type PiModel, ROOT_SESSION } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
@@ -21,7 +24,7 @@ import { createMemoryExtension, MemoryStore } from "./memory";
 import { createNearAiProvider, DEFAULT_NEARAI_MODEL } from "./providers";
 import { handleAgentHttpRequest } from "./routes";
 import { createSkillsExtension } from "./skills";
-import { AgentSockets } from "./sockets";
+import { ACCESS_TOKEN_EXP_HEADER, AgentSockets } from "./sockets";
 import { VaultCipher } from "./vault";
 import { createEncryptedSqliteDatabase } from "./vault-sqlite";
 
@@ -50,14 +53,27 @@ function timingSafeEqualText(a: string, b: string): boolean {
 }
 
 function hasLocalDevBearerAuth(request: Request, env: Env): boolean {
-  if (env.CF_ACCESS_TEAM_DOMAIN || env.CF_ACCESS_AUD || !env.AUTH_TOKEN) {
+  if (env.CF_ACCESS_TEAM_DOMAIN || env.CF_ACCESS_AUD) {
     return false;
   }
   const provided = request.headers.get("Authorization");
   if (!provided) {
     return false;
   }
-  return timingSafeEqualText(provided, `Bearer ${env.AUTH_TOKEN}`);
+  return timingSafeEqualText(provided, `Bearer ${LOCAL_DEV_AUTH_TOKEN}`);
+}
+
+function forwardToDurableObject(
+  stub: DurableObjectStub<PersonalAgent>,
+  request: Request,
+  tokenExpSec: number | null,
+): Promise<Response> {
+  const headers = new Headers(request.headers);
+  headers.delete(ACCESS_TOKEN_EXP_HEADER);
+  if (tokenExpSec !== null) {
+    headers.set(ACCESS_TOKEN_EXP_HEADER, String(tokenExpSec));
+  }
+  return stub.fetch(new Request(request, { headers }));
 }
 
 function allowedCorsOrigin(request: Request): string | null {
@@ -156,7 +172,8 @@ export class PersonalAgent extends DurableObject<Env> {
     {
       onResumeTakeover: async (takeoverId, note) =>
         this.resumeTakeover(takeoverId, note),
-      onClearWaitingTakeovers: () => this.browser.clearWaitingTakeovers(),
+      onClearWaitingTakeovers: (conversationId) =>
+        this.browser.clearWaitingTakeovers(conversationId),
       listWaitingTakeovers: () => this.browser.listWaitingTakeovers(),
       listActivities: () => this.activities.listActivities(),
       onSteerActivity: (activityId, instruction) =>
@@ -177,24 +194,23 @@ export class PersonalAgent extends DurableObject<Env> {
 
   protected createModelRegistry(): { models: MutableModels } {
     const models = createModels();
-    models.setProvider(
-      createNearAiProvider(
-        () => this.env.NEARAI_API_KEY,
-        () => this.env.NEARAI_BASE_URL,
-      ),
-    );
+    models.setProvider(createNearAiProvider(() => this.env.NEARAI_API_KEY));
     return { models };
   }
 
   protected resolveDefaultModel(): PiModel {
     return {
       provider: "nearai",
-      id: this.env.DEFAULT_MODEL ?? DEFAULT_NEARAI_MODEL.id,
+      id: DEFAULT_NEARAI_MODEL.id,
     };
   }
 
   protected createFetcher(): HttpFetcher {
     return (input, init) => fetch(input, init);
+  }
+
+  protected resolveBrowserBinding(): Pick<Fetcher, "fetch"> | undefined {
+    return this.env.BROWSER;
   }
 
   #installExtensions(): void {
@@ -220,29 +236,15 @@ export class PersonalAgent extends DurableObject<Env> {
       }),
     );
     const fetcher = this.createFetcher();
-    this.registry.install(
-      createConnectorsExtension(
-        this.connectors,
-        () => ({
-          gmailAccessToken: this.env.GMAIL_ACCESS_TOKEN,
-          calendarAccessToken: this.env.GOOGLE_CALENDAR_ACCESS_TOKEN,
-          gmailApiBaseUrl: this.env.GMAIL_API_BASE_URL,
-          calendarApiBaseUrl: this.env.CALENDAR_API_BASE_URL,
-        }),
-        fetcher,
-      ),
-    );
+    this.registry.install(createConnectorsExtension(this.connectors, fetcher));
     this.registry.install(
       createBrowserExtension(
         this.browser,
-        () => ({
-          endpoint: this.env.BROWSER_RUN_ENDPOINT,
-          token: this.env.BROWSER_RUN_TOKEN,
-        }),
+        () => this.resolveBrowserBinding(),
+        this.ctx.id.toString(),
         (record) => {
           this.sockets.broadcastTakeover(record);
         },
-        fetcher,
       ),
     );
   }
@@ -360,7 +362,6 @@ export default {
     const identity = await verifyCloudflareAccessJwt(request, {
       teamDomain: env.CF_ACCESS_TEAM_DOMAIN,
       aud: env.CF_ACCESS_AUD,
-      jwksJson: env.CF_ACCESS_JWKS_JSON,
     });
 
     const isDevAuthed = !identity && hasLocalDevBearerAuth(request, env);
@@ -376,7 +377,11 @@ export default {
     if (meMatch) {
       const agentId = identity?.sub ?? "personal";
       const stub = env.PersonalAgent.getByName(agentId);
-      const response = await stub.fetch(request);
+      const response = await forwardToDurableObject(
+        stub,
+        request,
+        identity?.exp ?? null,
+      );
       return withCors(request, response);
     }
 
@@ -397,7 +402,11 @@ export default {
     }
 
     const stub = env.PersonalAgent.getByName(requestedId);
-    const response = await stub.fetch(request);
+    const response = await forwardToDurableObject(
+      stub,
+      request,
+      identity?.exp ?? null,
+    );
     return withCors(request, response);
   },
 };

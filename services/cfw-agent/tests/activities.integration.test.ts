@@ -1,3 +1,4 @@
+import { LOCAL_DEV_AUTH_TOKEN } from "@pi-in-the-sky/client/protocol";
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -5,7 +6,7 @@ import { z } from "zod";
 import type { TestPersonalAgent } from "./worker";
 
 const AUTH_HEADERS = {
-  Authorization: "Bearer test-secret-token",
+  Authorization: `Bearer ${LOCAL_DEV_AUTH_TOKEN}`,
 };
 
 const SocketMessageSchema = z

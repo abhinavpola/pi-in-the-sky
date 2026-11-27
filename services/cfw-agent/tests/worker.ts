@@ -54,6 +54,14 @@ export class TestPersonalAgent extends PersonalAgent {
     return STUB_MODEL;
   }
 
+  protected override resolveBrowserBinding(): Pick<Fetcher, "fetch"> {
+    const fetcher = this.createFetcher();
+    return {
+      fetch: (input: RequestInfo | URL, init?: RequestInit) =>
+        fetcher(input, init),
+    };
+  }
+
   protected override createFetcher(): HttpFetcher {
     return async (input, init) => {
       const url =
@@ -63,13 +71,20 @@ export class TestPersonalAgent extends PersonalAgent {
             ? input.toString()
             : input.url;
 
-      if (url.startsWith("https://gmail.test/users/me/messages?")) {
+      if (
+        url.startsWith(
+          "https://gmail.googleapis.com/gmail/v1/users/me/messages?",
+        )
+      ) {
         return Response.json({
           messages: [{ id: "msg-tokyo-2025", threadId: "thread-tokyo-2025" }],
         });
       }
 
-      if (url === "https://gmail.test/users/me/messages/msg-tokyo-2025") {
+      if (
+        url ===
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages/msg-tokyo-2025"
+      ) {
         return Response.json({
           id: "msg-tokyo-2025",
           snippet:
@@ -86,7 +101,11 @@ export class TestPersonalAgent extends PersonalAgent {
         });
       }
 
-      if (url.startsWith("https://calendar.test/calendars/primary/events?")) {
+      if (
+        url.startsWith(
+          "https://www.googleapis.com/calendar/v3/calendars/primary/events?",
+        )
+      ) {
         return Response.json({
           items: [
             {
@@ -98,7 +117,7 @@ export class TestPersonalAgent extends PersonalAgent {
         });
       }
 
-      if (url === "https://browser.test/navigate") {
+      if (url === "https://browser.internal/navigate") {
         const body = typeof init?.body === "string" ? init.body : "{}";
         return Response.json({
           ok: true,
@@ -107,7 +126,7 @@ export class TestPersonalAgent extends PersonalAgent {
         });
       }
 
-      if (url === "https://browser.test/snapshot") {
+      if (url === "https://browser.internal/snapshot") {
         return Response.json({
           ok: true,
           text: "ANA NH7 nonstop SFO -> NRT Oct 12-20, 2026. Economy Window: $1,120 total.",

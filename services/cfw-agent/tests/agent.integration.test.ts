@@ -1,3 +1,4 @@
+import { LOCAL_DEV_AUTH_TOKEN } from "@pi-in-the-sky/client/protocol";
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -6,7 +7,7 @@ import { verifyCloudflareAccessJwt } from "../src/access-auth";
 import type { TestPersonalAgent } from "./worker";
 
 const AUTH_HEADERS = {
-  Authorization: "Bearer test-secret-token",
+  Authorization: `Bearer ${LOCAL_DEV_AUTH_TOKEN}`,
 };
 
 const SocketMessageSchema = z
@@ -185,6 +186,7 @@ describe("cfw-agent workerd integration", () => {
     expect(verified).toEqual({
       sub: "user-abhinav-1",
       email: "abhinav@example.com",
+      exp: expect.any(Number),
     });
 
     const wrongAudJwt = await signAccessJwt(
@@ -252,6 +254,16 @@ describe("cfw-agent workerd integration", () => {
       },
     );
     expect(putToken.status).toBe(200);
+
+    const putCalendarToken = await SELF.fetch(
+      `https://agent.test/api/agents/${agentId}/connectors/google_calendar/token`,
+      {
+        method: "PUT",
+        headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
+        body: JSON.stringify({ accessToken: "calendar-test-token" }),
+      },
+    );
+    expect(putCalendarToken.status).toBe(200);
 
     const stub = stubFor(agentId);
     await stub.setScript(agentId, [

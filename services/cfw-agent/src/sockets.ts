@@ -24,9 +24,35 @@ import type { CommandResult, ServerMessage } from "./protocol";
 
 const OPEN = 1;
 const SESSION_TAG_PREFIX = "pi-session:";
+const EXP_TAG_PREFIX = "pi-exp:";
+export const ACCESS_TOKEN_EXP_HEADER = "X-Access-Token-Exp";
 
 function sessionTag(session: PiSessionId): string {
   return `${SESSION_TAG_PREFIX}${session}`;
+}
+
+function expTagFromRequest(request: Request): string | null {
+  const raw = request.headers.get(ACCESS_TOKEN_EXP_HEADER);
+  if (!raw) {
+    return null;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return `${EXP_TAG_PREFIX}${Math.floor(parsed)}`;
+}
+
+function expFromTags(tags: readonly string[]): number | null {
+  for (const tag of tags) {
+    if (tag.startsWith(EXP_TAG_PREFIX)) {
+      const parsed = Number(tag.slice(EXP_TAG_PREFIX.length));
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed;
+      }
+    }
+  }
+  return null;
 }
 
 function sessionFromRequest(
@@ -71,7 +97,7 @@ type SocketCallbacks = {
     takeoverId: string,
     note?: string,
   ) => Promise<CommandResult>;
-  readonly onClearWaitingTakeovers: () => void;
+  readonly onClearWaitingTakeovers: (conversationId: number) => void;
   readonly listWaitingTakeovers: () => Promise<BrowserTakeoverRecord[]>;
   readonly listActivities: () => Promise<ActivityRecord[]>;
   readonly onSteerActivity: (
@@ -106,9 +132,16 @@ export class AgentSockets {
 
   options(): WebSocketsOptions {
     return {
-      getConnectionTags: (_connection, ctx) => [
-        sessionTag(sessionFromRequest(ctx.request, ROOT_SESSION)),
-      ],
+      getConnectionTags: (_connection, ctx) => {
+        const tags = [
+          sessionTag(sessionFromRequest(ctx.request, ROOT_SESSION)),
+        ];
+        const expTag = expTagFromRequest(ctx.request);
+        if (expTag) {
+          tags.push(expTag);
+        }
+        return tags;
+      },
       handlers: {
         onConnect: (connection, ctx) => this.#onConnect(connection, ctx),
         onMessage: (connection, message) =>
@@ -143,7 +176,12 @@ export class AgentSockets {
     if (this.#getWebSockets().length === 0) {
       return;
     }
-    for (const { id } of await this.#harness.sessions.list()) {
+    const activities = await this.#callbacks.listActivities();
+    const sessionIds = new Set<PiSessionId>([
+      ROOT_SESSION,
+      ...activities.map((activity) => activity.sessionId),
+    ]);
+    for (const id of sessionIds) {
       for (const socket of this.#getWebSockets(sessionTag(id))) {
         await this.#watchOrClose(socket, id);
       }
@@ -250,6 +288,20 @@ export class AgentSockets {
     connection: Connection,
     message: WebSocketMessage,
   ): Promise<void> {
+    const tokenExpSec = expFromTags(connection.tags);
+    if (tokenExpSec !== null && Date.now() / 1000 >= tokenExpSec) {
+      send(connection, {
+        type: "error",
+        message: "Access token expired; reconnect with a fresh token.",
+      });
+      await this.#unwatch(connection);
+      try {
+        connection.close(4401, "Access token expired");
+      } catch {
+        return;
+      }
+      return;
+    }
     if (typeof message !== "string") {
       send(connection, { type: "error", message: "Expected text frame" });
       return;
@@ -297,11 +349,19 @@ export class AgentSockets {
         });
       }
       case "abort": {
-        this.#callbacks.onClearWaitingTakeovers();
+        const conversationId =
+          this.#watches.get(connection)?.value.conversation.id;
+        if (conversationId !== undefined) {
+          this.#callbacks.onClearWaitingTakeovers(Number(conversationId));
+        }
         return this.#harness.session(session).abort();
       }
       case "reset": {
-        this.#callbacks.onClearWaitingTakeovers();
+        const conversationId =
+          this.#watches.get(connection)?.value.conversation.id;
+        if (conversationId !== undefined) {
+          this.#callbacks.onClearWaitingTakeovers(Number(conversationId));
+        }
         await this.#harness.session(session).reset(msg.handoff);
         return { ok: true };
       }

@@ -9,13 +9,9 @@ import {
   type TakeoverRecord,
   TakeoverRecordSchema,
 } from "@pi-in-the-sky/client/protocol";
-import { err } from "@pi-in-the-sky/result-monad";
+import { err, ok } from "@pi-in-the-sky/result-monad";
 
-import {
-  fetchJsonWithBearer,
-  type HttpFetcher,
-  toToolResult,
-} from "./http-tool";
+import { toToolResult } from "./http-tool";
 import type { VaultCipher } from "./vault";
 
 const TakeoverResumeSchema = obj({
@@ -38,14 +34,10 @@ export type BrowserTakeoverRecord = TakeoverRecord & {
   readonly createdAt: number;
 };
 
-type BrowserRuntimeConfig = {
-  readonly endpoint?: string;
-  readonly token?: string;
-};
-
 type BrowserTakeoverRow = {
   id: string;
   task_id: TaskId;
+  conversation_id: number;
   payload_enc: string;
   status: TakeoverRecord["status"];
   created_at: number;
@@ -68,6 +60,7 @@ export class BrowserStore {
       CREATE TABLE IF NOT EXISTS browser_takeovers_vault (
         id TEXT PRIMARY KEY,
         task_id INTEGER NOT NULL,
+        conversation_id INTEGER NOT NULL DEFAULT 0,
         payload_enc TEXT NOT NULL,
         status TEXT NOT NULL,
         created_at INTEGER NOT NULL
@@ -78,6 +71,7 @@ export class BrowserStore {
   async createTakeover(input: {
     readonly id: string;
     readonly taskId: TaskId;
+    readonly conversationId: number;
     readonly url: string;
     readonly liveViewUrl: string | null;
     readonly reason: string;
@@ -93,10 +87,11 @@ export class BrowserStore {
     );
     this.#sql.exec(
       `INSERT OR IGNORE INTO browser_takeovers_vault (
-        id, task_id, payload_enc, status, created_at
-      ) VALUES (?, ?, ?, 'waiting', ?)`,
+        id, task_id, conversation_id, payload_enc, status, created_at
+      ) VALUES (?, ?, ?, ?, 'waiting', ?)`,
       input.id,
       Number(input.taskId),
+      input.conversationId,
       encrypted,
       createdAt,
     );
@@ -127,7 +122,7 @@ export class BrowserStore {
   async getTakeover(id: string): Promise<BrowserTakeoverRecord | undefined> {
     const rows = this.#sql
       .exec<BrowserTakeoverRow>(
-        "SELECT id, task_id, payload_enc, status, created_at FROM browser_takeovers_vault WHERE id = ?",
+        "SELECT id, task_id, conversation_id, payload_enc, status, created_at FROM browser_takeovers_vault WHERE id = ?",
         id,
       )
       .toArray();
@@ -141,7 +136,7 @@ export class BrowserStore {
   async listWaitingTakeovers(): Promise<BrowserTakeoverRecord[]> {
     const rows = this.#sql
       .exec<BrowserTakeoverRow>(
-        "SELECT id, task_id, payload_enc, status, created_at FROM browser_takeovers_vault WHERE status = 'waiting' ORDER BY created_at ASC",
+        "SELECT id, task_id, conversation_id, payload_enc, status, created_at FROM browser_takeovers_vault WHERE status = 'waiting' ORDER BY created_at ASC",
       )
       .toArray();
     return Promise.all(rows.map((row) => this.#toTakeover(row)));
@@ -154,9 +149,10 @@ export class BrowserStore {
     );
   }
 
-  clearWaitingTakeovers(): void {
+  clearWaitingTakeovers(conversationId: number): void {
     this.#sql.exec(
-      "UPDATE browser_takeovers_vault SET status = 'resumed' WHERE status = 'waiting'",
+      "UPDATE browser_takeovers_vault SET status = 'resumed' WHERE status = 'waiting' AND conversation_id = ?",
+      conversationId,
     );
   }
 }
@@ -188,30 +184,42 @@ type BrowserAction = "navigate" | "snapshot" | "click" | "fill";
 
 export function createBrowserExtension(
   store: BrowserStore,
-  getConfig: () => BrowserRuntimeConfig,
+  getBrowser: () => Pick<Fetcher, "fetch"> | undefined,
+  sessionScope: string,
   onTakeoverRequested: (record: BrowserTakeoverRecord) => void,
-  fetcher: HttpFetcher = (input, init) => fetch(input, init),
 ): Extension {
   const runAction = async (
     action: BrowserAction,
     body: Record<string, unknown>,
   ) => {
-    const config = getConfig();
-    if (!config.endpoint) {
+    const browser = getBrowser();
+    if (!browser) {
       return toToolResult(
-        err("BROWSER_RUN_ENDPOINT is not configured for browser automation."),
+        err("Cloudflare Browser Rendering binding (BROWSER) is not available."),
       );
     }
-    const base = config.endpoint.replace(/\/$/, "");
-    const result = await fetchJsonWithBearer(`${base}/${action}`, fetcher, {
-      token: config.token,
-      errorPrefix: "Browser",
-      init: {
-        method: "POST",
-        body: JSON.stringify(body),
-      },
-    });
-    return toToolResult(result);
+    try {
+      const response = await browser.fetch(
+        `https://browser.internal/${action}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Agent-Session": sessionScope,
+          },
+          body: JSON.stringify(body),
+        },
+      );
+      const text = await response.text();
+      if (!response.ok) {
+        return toToolResult(err(`Browser error (${response.status}): ${text}`));
+      }
+      return toToolResult(ok<unknown>(text ? JSON.parse(text) : {}));
+    } catch (thrown) {
+      return toToolResult(
+        err(thrown instanceof Error ? thrown.message : String(thrown)),
+      );
+    }
   };
 
   const navigateTool: ToolRegistration<typeof NavigateSchema> = {
@@ -289,6 +297,7 @@ export function createBrowserExtension(
       const record = await store.createTakeover({
         id: takeoverId,
         taskId: api.taskId,
+        conversationId: Number(api.conversationId),
         url: args.url,
         liveViewUrl: args.liveViewUrl ?? null,
         reason: args.reason,

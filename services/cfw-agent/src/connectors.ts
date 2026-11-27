@@ -12,12 +12,8 @@ import { toBase64, type VaultCipher } from "./vault";
 export const ConnectorProviderSchema = z.enum(["gmail", "google_calendar"]);
 type ConnectorProvider = z.infer<typeof ConnectorProviderSchema>;
 
-type ConnectorConfig = {
-  readonly gmailAccessToken?: string;
-  readonly calendarAccessToken?: string;
-  readonly gmailApiBaseUrl?: string;
-  readonly calendarApiBaseUrl?: string;
-};
+const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
+const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3";
 
 type TokenRow = {
   provider: string;
@@ -126,38 +122,14 @@ function encodeBase64Url(input: string): string {
 
 export function createConnectorsExtension(
   store: ConnectorStore,
-  getConfig: () => ConnectorConfig,
   fetcher: HttpFetcher = (input, init) => fetch(input, init),
 ): Extension {
-  const resolveToken = async (
+  const resolveToken = (
     provider: ConnectorProvider,
-  ): Promise<string | undefined> => {
-    const stored = await store.getAccessToken(provider);
-    if (stored) {
-      return stored;
-    }
-    const config = getConfig();
-    switch (provider) {
-      case "gmail":
-        return config.gmailAccessToken;
-      case "google_calendar":
-        return config.calendarAccessToken;
-      default: {
-        provider satisfies never;
-        return undefined;
-      }
-    }
-  };
+  ): Promise<string | undefined> => store.getAccessToken(provider);
 
-  const gmailBase = () =>
-    (
-      getConfig().gmailApiBaseUrl ?? "https://gmail.googleapis.com/gmail/v1"
-    ).replace(/\/$/, "");
-
-  const calendarBase = () =>
-    (
-      getConfig().calendarApiBaseUrl ?? "https://www.googleapis.com/calendar/v3"
-    ).replace(/\/$/, "");
+  const gmailBase = () => GMAIL_API_BASE;
+  const calendarBase = () => CALENDAR_API_BASE;
 
   const gmailSearchTool: ToolRegistration<typeof GmailSearchSchema> = {
     name: "gmail_search",

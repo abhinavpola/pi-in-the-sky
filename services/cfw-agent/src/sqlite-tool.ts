@@ -13,19 +13,18 @@ const SqliteQuerySchema = obj({
 });
 
 const SQLITE_SCHEMA_GUIDE = [
-  "You have direct SQLite access to your agent database via sqlite_query (secrets live in an isolated host facet and are never in this database).",
+  "You have direct SQLite access to your agent database via sqlite_query.",
   "Key tables:",
   "- user_profile (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)",
   "- memory_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, category TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL) + FTS5 memory_notes_fts",
   "- activities (id, title, session_id, status, summary, collapsed, created_at, updated_at)",
-  "- Inspect all tables (including conversation/pre-compaction history) with: SELECT name, sql FROM sqlite_master WHERE type='table'",
 ].join("\n");
 
 export function createSqliteExtension(sql: SqlStorage): Extension {
   const sqliteQueryTool: ToolRegistration<typeof SqliteQuerySchema> = {
     name: "sqlite_query",
     description:
-      "Execute a parameterized SQLite query against your agent database (user_profile, memory_notes, memory_notes_fts, activities, and conversation history). Pass bind parameters in params.",
+      "Execute a parameterized SQLite query against your agent database. Pass bind parameters in params.",
     parameters: SqliteQuerySchema,
     replay: "unsafe",
     async execute({ sql: query, params }) {

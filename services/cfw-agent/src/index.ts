@@ -161,12 +161,17 @@ export class PersonalAgent extends DurableObject<Env> {
         );
       },
       runModule: async (payload: ScheduleModulePayload) => {
-        await this.extensionsRuntime.runModule({
+        const result = await this.extensionsRuntime.runModule({
           path: payload.path,
           input: payload.input,
           facet: payload.facet,
           className: payload.className,
         });
+        if (!result.ok) {
+          throw new Error(
+            `Scheduled module "${payload.path}" failed (${result.status}): ${JSON.stringify(result.output)}`,
+          );
+        }
       },
     },
   });

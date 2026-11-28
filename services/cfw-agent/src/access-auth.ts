@@ -79,9 +79,15 @@ function getKeyResolver(
   if (existing) {
     return existing;
   }
-  const remote = createRemoteJWKSet(new URL(`${origin}/cdn-cgi/access/certs`));
-  remoteJwksCache.set(origin, remote);
-  return remote;
+  try {
+    const remote = createRemoteJWKSet(
+      new URL(`${origin}/cdn-cgi/access/certs`),
+    );
+    remoteJwksCache.set(origin, remote);
+    return remote;
+  } catch {
+    return null;
+  }
 }
 
 export async function verifyCloudflareAccessJwt(

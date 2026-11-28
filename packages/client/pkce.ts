@@ -1,3 +1,5 @@
+import { err, ok, type Result } from "@pi-in-the-sky/result-monad";
+
 const BASE64URL_ALPHABET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
@@ -107,19 +109,18 @@ function sha256Ascii(input: string): Uint8Array {
   return out;
 }
 
-export function randomBase64Url(byteLength: number): string {
+export function randomBase64Url(byteLength: number): Result<string, string> {
   const bytes = new Uint8Array(byteLength);
   if (
-    typeof crypto !== "undefined" &&
-    typeof crypto.getRandomValues === "function"
+    typeof crypto === "undefined" ||
+    typeof crypto.getRandomValues !== "function"
   ) {
-    crypto.getRandomValues(bytes);
-  } else {
-    throw new Error(
+    return err(
       "Cryptographic RNG (crypto.getRandomValues) is unavailable in this runtime.",
     );
   }
-  return toBase64Url(bytes);
+  crypto.getRandomValues(bytes);
+  return ok(toBase64Url(bytes));
 }
 
 export function sha256Base64Url(input: string): string {

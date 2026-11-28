@@ -1,3 +1,4 @@
+import { ok, type Result } from "@pi-in-the-sky/result-monad";
 import { z } from "zod";
 
 import {
@@ -105,14 +106,20 @@ export type PkceSession = {
   readonly codeChallenge: string;
 };
 
-export function createPkceSession(): PkceSession {
+export function createPkceSession(): Result<PkceSession, string> {
   const state = randomBase64Url(32);
+  if (!state.ok) {
+    return state;
+  }
   const codeVerifier = randomBase64Url(32);
-  return {
-    state,
-    codeVerifier,
-    codeChallenge: sha256Base64Url(codeVerifier),
-  };
+  if (!codeVerifier.ok) {
+    return codeVerifier;
+  }
+  return ok({
+    state: state.value,
+    codeVerifier: codeVerifier.value,
+    codeChallenge: sha256Base64Url(codeVerifier.value),
+  });
 }
 
 export function buildAccessAuthorizeUrl(

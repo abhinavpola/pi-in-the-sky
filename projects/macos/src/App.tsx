@@ -23,12 +23,42 @@ import {
 } from "./native";
 import { THEME } from "./theme";
 
-type ViewMode = "onboarding" | "stream" | "memory" | "settings";
+type ActiveTab = "stream" | "memory" | "settings";
+
+type AppState =
+  | { readonly kind: "onboarding" }
+  | {
+      readonly kind: "signed_out_settings";
+      readonly config: ConnectionConfig;
+    }
+  | {
+      readonly kind: "active";
+      readonly tab: ActiveTab;
+      readonly config: ConnectionConfig;
+      readonly showDrawer: boolean;
+    };
 
 const DEFAULT_CONFIG: ConnectionConfig = {
   baseUrl: "http://127.0.0.1:8787",
   authToken: "",
 };
+
+const ACTIVE_TABS: readonly ActiveTab[] = ["stream", "memory", "settings"];
+
+function tabLabel(tab: ActiveTab): string {
+  switch (tab) {
+    case "stream":
+      return "Chat";
+    case "memory":
+      return "Memory";
+    case "settings":
+      return "Settings";
+    default: {
+      tab satisfies never;
+      return "";
+    }
+  }
+}
 
 function connectionDotColor(state: ConnectionState): string {
   switch (state) {
@@ -46,9 +76,7 @@ function connectionDotColor(state: ConnectionState): string {
 }
 
 export function App() {
-  const [viewMode, setViewMode] = useState<ViewMode>("onboarding");
-  const [showDrawer, setShowDrawer] = useState(false);
-  const [config, setConfig] = useState<ConnectionConfig>(DEFAULT_CONFIG);
+  const [appState, setAppState] = useState<AppState>({ kind: "onboarding" });
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("disconnected");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -90,9 +118,13 @@ export function App() {
         return;
       }
       if (result.value && result.value.authToken.trim().length > 0) {
-        setConfig(result.value);
         client.updateConfig(result.value);
-        setViewMode("stream");
+        setAppState({
+          kind: "active",
+          tab: "stream",
+          config: result.value,
+          showDrawer: false,
+        });
         return;
       }
       if (__DEV__) {
@@ -100,9 +132,13 @@ export function App() {
           baseUrl: DEFAULT_CONFIG.baseUrl,
           authToken: LOCAL_DEV_AUTH_TOKEN,
         };
-        setConfig(devConfig);
         client.updateConfig(devConfig);
-        setViewMode("stream");
+        setAppState({
+          kind: "active",
+          tab: "stream",
+          config: devConfig,
+          showDrawer: false,
+        });
       }
     });
     return () => {
@@ -121,10 +157,14 @@ export function App() {
     ) {
       return;
     }
-    setConfig(next);
     setErrorBanner(null);
     client.updateConfig(next);
-    setViewMode("stream");
+    setAppState({
+      kind: "active",
+      tab: "stream",
+      config: next,
+      showDrawer: false,
+    });
     const epoch = sessionEpochRef.current;
     void saveStoredConnectionConfig(next).then((saved) => {
       if (sessionEpochRef.current !== epoch) {
@@ -136,22 +176,22 @@ export function App() {
     });
   };
 
-  const handleSignOut = () => {
+  const handleSignOut = (currentConfig: ConnectionConfig) => {
     sessionEpochRef.current += 1;
     setErrorBanner(null);
-    setShowDrawer(false);
     client.clearSession();
-    if (config.accessTeamDomain && config.accessClientId) {
-      setConfig({
-        baseUrl: config.baseUrl,
-        authToken: "",
-        accessTeamDomain: config.accessTeamDomain,
-        accessClientId: config.accessClientId,
+    if (currentConfig.accessTeamDomain && currentConfig.accessClientId) {
+      setAppState({
+        kind: "signed_out_settings",
+        config: {
+          baseUrl: currentConfig.baseUrl,
+          authToken: "",
+          accessTeamDomain: currentConfig.accessTeamDomain,
+          accessClientId: currentConfig.accessClientId,
+        },
       });
-      setViewMode("settings");
     } else {
-      setConfig(DEFAULT_CONFIG);
-      setViewMode("onboarding");
+      setAppState({ kind: "onboarding" });
     }
     void clearStoredConnectionConfig().then((cleared) => {
       if (!cleared.ok) {
@@ -163,10 +203,8 @@ export function App() {
   const handleOffboard = () => {
     sessionEpochRef.current += 1;
     setErrorBanner(null);
-    setShowDrawer(false);
     client.clearSession();
-    setConfig(DEFAULT_CONFIG);
-    setViewMode("onboarding");
+    setAppState({ kind: "onboarding" });
     void clearStoredConnectionConfig().then((cleared) => {
       if (!cleared.ok) {
         setErrorBanner(cleared.error);
@@ -183,19 +221,17 @@ export function App() {
     (item) => item.status === "running" || item.status === "waiting_input",
   ).length;
 
-  const renderContent = (mode: ViewMode) => {
-    switch (mode) {
-      case "onboarding":
-        return (
-          <OnboardingView onComplete={(next) => applyAndPersistConfig(next)} />
-        );
+  const renderActiveTab = (
+    active: Extract<AppState, { readonly kind: "active" }>,
+  ) => {
+    switch (active.tab) {
       case "stream":
         return (
           <StreamView
             messages={messages}
             activities={activities}
             activeTakeovers={activeTakeovers}
-            showDrawer={showDrawer}
+            showDrawer={active.showDrawer}
             onSend={(text) => {
               setErrorBanner(null);
               return client.submitPrompt(text);
@@ -216,16 +252,42 @@ export function App() {
       case "settings":
         return (
           <SettingsPane
-            config={config}
+            config={active.config}
             connectionState={connectionState}
             getSessionEpoch={() => sessionEpochRef.current}
             onSave={applyAndPersistConfig}
-            onSignOut={handleSignOut}
+            onSignOut={() => handleSignOut(active.config)}
             onOffboard={handleOffboard}
           />
         );
       default: {
-        mode satisfies never;
+        active.tab satisfies never;
+        return null;
+      }
+    }
+  };
+
+  const renderContent = (current: AppState) => {
+    switch (current.kind) {
+      case "onboarding":
+        return (
+          <OnboardingView onComplete={(next) => applyAndPersistConfig(next)} />
+        );
+      case "signed_out_settings":
+        return (
+          <SettingsPane
+            config={current.config}
+            connectionState={connectionState}
+            getSessionEpoch={() => sessionEpochRef.current}
+            onSave={applyAndPersistConfig}
+            onSignOut={() => handleSignOut(current.config)}
+            onOffboard={handleOffboard}
+          />
+        );
+      case "active":
+        return renderActiveTab(current);
+      default: {
+        current satisfies never;
         return null;
       }
     }
@@ -233,10 +295,12 @@ export function App() {
 
   return (
     <SafeAreaView style={styles.root}>
-      {viewMode === "onboarding" ||
-      config.authToken.trim().length === 0 ? null : (
+      {appState.kind === "active" ? (
         <View style={styles.toolbar}>
-          <Pressable style={styles.brand} onPress={() => setViewMode("stream")}>
+          <Pressable
+            style={styles.brand}
+            onPress={() => setAppState({ ...appState, tab: "stream" })}
+          >
             <View
               style={[
                 styles.statusDot,
@@ -247,19 +311,13 @@ export function App() {
           </Pressable>
 
           <View style={styles.segmented}>
-            {(["stream", "memory", "settings"] as const).map((tab) => {
-              const active = viewMode === tab;
-              const label =
-                tab === "stream"
-                  ? "Chat"
-                  : tab === "memory"
-                    ? "Memory"
-                    : "Settings";
+            {ACTIVE_TABS.map((tab) => {
+              const active = appState.tab === tab;
               return (
                 <Pressable
                   key={tab}
                   style={[styles.segment, active && styles.segmentActive]}
-                  onPress={() => setViewMode(tab)}
+                  onPress={() => setAppState({ ...appState, tab })}
                 >
                   <Text
                     style={[
@@ -267,7 +325,7 @@ export function App() {
                       active && styles.segmentTextActive,
                     ]}
                   >
-                    {label}
+                    {tabLabel(tab)}
                   </Text>
                 </Pressable>
               );
@@ -275,20 +333,29 @@ export function App() {
           </View>
 
           <Pressable
-            style={[styles.tasksButton, showDrawer && styles.tasksButtonActive]}
-            onPress={() => {
-              setViewMode("stream");
-              setShowDrawer((prev) => !prev);
-            }}
+            style={[
+              styles.tasksButton,
+              appState.showDrawer && styles.tasksButtonActive,
+            ]}
+            onPress={() =>
+              setAppState({
+                ...appState,
+                tab: "stream",
+                showDrawer: !appState.showDrawer,
+              })
+            }
           >
             <Text
-              style={[styles.tasksText, showDrawer && styles.tasksTextActive]}
+              style={[
+                styles.tasksText,
+                appState.showDrawer && styles.tasksTextActive,
+              ]}
             >
               Tasks{runningCount > 0 ? ` · ${runningCount}` : ""}
             </Text>
           </Pressable>
         </View>
-      )}
+      ) : null}
 
       {errorBanner ? (
         <View style={styles.errorBar}>
@@ -296,7 +363,7 @@ export function App() {
         </View>
       ) : null}
 
-      <View style={styles.main}>{renderContent(viewMode)}</View>
+      <View style={styles.main}>{renderContent(appState)}</View>
     </SafeAreaView>
   );
 }

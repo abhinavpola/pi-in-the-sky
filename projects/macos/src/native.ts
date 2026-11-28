@@ -76,7 +76,11 @@ export async function signInWithCloudflareAccess(params: {
     return bridge;
   }
 
-  const pkce = createPkceSession();
+  const pkceResult = createPkceSession();
+  if (!pkceResult.ok) {
+    return pkceResult;
+  }
+  const pkce = pkceResult.value;
   const authorizeUrl = buildAccessAuthorizeUrl(
     params.teamDomain,
     params.clientId,

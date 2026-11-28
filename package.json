@@ -15,6 +15,9 @@
     "test": "bun run --filter '@pi-in-the-sky/cfw-agent' test",
     "typecheck": "bun check -b"
   },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
   "devDependencies": {
     "@types/bun": "latest",
     "fallow": "^3.50.0",

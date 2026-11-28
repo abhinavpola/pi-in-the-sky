@@ -110,7 +110,7 @@ export class InboxCursorFacet extends DurableObject {
 const FACET_V2_TS = FACET_V1_TS.replace('version: "v1"', 'version: "v2"');
 
 describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facets)", () => {
-  it("writes TS modules under extension/, runs cross-module Dynamic Workers, persists state in DO Facets across code updates, and deletes files", async () => {
+  it("overlays bundled built-in extension/ files with Artifacts, runs cross-module Dynamic Workers, persists state in DO Facets across code updates, and restores overridden built-ins on delete", async () => {
     const stub: DurableObjectStub<TestPersonalAgent> =
       env.PersonalAgent.getByName("personal");
 
@@ -118,8 +118,28 @@ describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facet
       {
         toolCalls: [
           {
+            id: "tc-list-builtin",
+            name: "list_files",
+            arguments: {},
+          },
+          {
+            id: "tc-read-builtin",
+            name: "read_file",
+            arguments: { path: "instructions.md" },
+          },
+          {
+            id: "tc-override-skill",
+            name: "write_file",
+            arguments: {
+              path: "skills/email-inbox-triage/SKILL.md",
+              content:
+                "# Custom Inbox Triage\nAlways prioritize VIP senders.\n",
+              commitMessage: "Override built-in email-inbox-triage skill",
+            },
+          },
+          {
             id: "tc-write-lib",
-            name: "extension_write_file",
+            name: "write_file",
             arguments: {
               path: "lib/math.ts",
               content: LIB_MATH_TS,
@@ -128,7 +148,7 @@ describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facet
           },
           {
             id: "tc-write-tool",
-            name: "extension_write_file",
+            name: "write_file",
             arguments: {
               path: "tools/sum.ts",
               content: TOOL_SUM_TS,
@@ -137,7 +157,7 @@ describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facet
           },
           {
             id: "tc-write-skill",
-            name: "extension_write_file",
+            name: "write_file",
             arguments: {
               path: "skills/triage/SKILL.md",
               content: "# Triage Skill\nSort incoming items by urgency.\n",
@@ -146,7 +166,7 @@ describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facet
           },
           {
             id: "tc-write-facet-v1",
-            name: "extension_write_file",
+            name: "write_file",
             arguments: {
               path: "extension.ts",
               content: FACET_V1_TS,
@@ -159,17 +179,22 @@ describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facet
         toolCalls: [
           {
             id: "tc-list",
-            name: "extension_list_files",
+            name: "list_files",
             arguments: {},
           },
           {
             id: "tc-read",
-            name: "extension_read_file",
+            name: "read_file",
             arguments: { path: "skills/triage/SKILL.md" },
           },
           {
+            id: "tc-read-override",
+            name: "read_file",
+            arguments: { path: "skills/email-inbox-triage/SKILL.md" },
+          },
+          {
             id: "tc-run-sum",
-            name: "extension_run",
+            name: "run_module",
             arguments: {
               path: "tools/sum.ts",
               input: { numbers: [10, 20, 12] },
@@ -177,7 +202,7 @@ describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facet
           },
           {
             id: "tc-facet-1",
-            name: "extension_run",
+            name: "run_module",
             arguments: {
               path: "extension.ts",
               facet: "inbox",
@@ -191,7 +216,7 @@ describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facet
         toolCalls: [
           {
             id: "tc-facet-2",
-            name: "extension_run",
+            name: "run_module",
             arguments: {
               path: "extension.ts",
               facet: "inbox",
@@ -205,7 +230,7 @@ describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facet
         toolCalls: [
           {
             id: "tc-write-facet-v2",
-            name: "extension_write_file",
+            name: "write_file",
             arguments: {
               path: "extension.ts",
               content: FACET_V2_TS,
@@ -218,7 +243,7 @@ describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facet
         toolCalls: [
           {
             id: "tc-facet-3",
-            name: "extension_run",
+            name: "run_module",
             arguments: {
               path: "extension.ts",
               facet: "inbox",
@@ -228,10 +253,18 @@ describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facet
           },
           {
             id: "tc-delete-tool",
-            name: "extension_delete_file",
+            name: "delete_file",
             arguments: {
               path: "tools/sum.ts",
               commitMessage: "Remove temporary sum tool",
+            },
+          },
+          {
+            id: "tc-delete-override",
+            name: "delete_file",
+            arguments: {
+              path: "skills/email-inbox-triage/SKILL.md",
+              commitMessage: "Restore built-in email-inbox-triage skill",
             },
           },
         ],
@@ -276,6 +309,10 @@ describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facet
 
     const finalMsg = await doneView;
     const serialized = JSON.stringify(finalMsg.view ?? null);
+    expect(serialized).toContain("instructions.md");
+    expect(serialized).toContain("Always prioritize VIP senders.");
+    expect(serialized).toContain('\\"source\\":\\"override\\"');
+    expect(serialized).toContain('\\"restoredBuiltin\\":true');
     expect(serialized).toContain("skills/triage/SKILL.md");
     expect(serialized).toContain('\\"sum\\":42');
     expect(serialized).toContain('\\"count\\":3');

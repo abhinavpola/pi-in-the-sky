@@ -1,11 +1,20 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { bundleBuiltinExtension } from "./bundle-builtin-extension";
+
+await bundleBuiltinExtension();
+
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const workerDir = path.join(repoRoot, "services", "cfw-agent");
-const outputDir = path.join(repoRoot, "packages", "client", "generated");
-const outputFile = path.join(outputDir, "worker-bundle.json");
+const outputFile = path.join(
+  repoRoot,
+  "packages",
+  "client",
+  "generated",
+  "worker-bundle.json",
+);
 
 const tempDir = await mkdtemp(path.join(tmpdir(), "pi-in-the-sky-worker-"));
 
@@ -36,9 +45,8 @@ try {
     process.exit(exitCode);
   }
 
-  const code = await readFile(path.join(tempDir, "index.js"), "utf8");
-  await mkdir(outputDir, { recursive: true });
-  await writeFile(outputFile, JSON.stringify({ code }), "utf8");
+  const code = await Bun.file(path.join(tempDir, "index.js")).text();
+  await Bun.write(outputFile, JSON.stringify({ code }));
 } finally {
   await rm(tempDir, { recursive: true, force: true });
 }

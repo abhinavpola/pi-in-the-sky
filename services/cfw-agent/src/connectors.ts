@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+
 import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { num, obj, opt, str } from "@earendil-works/pi-schema";
 import type { ConnectorProvider } from "@pi-in-the-sky/client/protocol";
@@ -7,70 +9,10 @@ import {
   type HttpFetcher,
   toToolResult,
 } from "./http-tool";
+import type { SecretsFacetStore } from "./secrets-facet";
 
 const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
 const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3";
-
-function toBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
-}
-
-type TokenRow = {
-  access_token: string;
-};
-
-export class ConnectorStore {
-  readonly #sql: SqlStorage;
-
-  constructor(sql: SqlStorage) {
-    this.#sql = sql;
-    this.#sql.exec(`
-      CREATE TABLE IF NOT EXISTS connector_tokens (
-        provider TEXT PRIMARY KEY,
-        access_token TEXT NOT NULL,
-        refresh_token TEXT,
-        expires_at INTEGER,
-        updated_at INTEGER NOT NULL
-      );
-    `);
-  }
-
-  setToken(
-    provider: ConnectorProvider,
-    accessToken: string,
-    refreshToken?: string,
-    expiresAt?: number,
-  ): void {
-    this.#sql.exec(
-      `INSERT INTO connector_tokens (provider, access_token, refresh_token, expires_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(provider) DO UPDATE SET
-         access_token = excluded.access_token,
-         refresh_token = excluded.refresh_token,
-         expires_at = excluded.expires_at,
-         updated_at = excluded.updated_at`,
-      provider,
-      accessToken,
-      refreshToken ?? null,
-      expiresAt ?? null,
-      Date.now(),
-    );
-  }
-
-  getAccessToken(provider: ConnectorProvider): string | undefined {
-    const row = this.#sql
-      .exec<TokenRow>(
-        "SELECT access_token FROM connector_tokens WHERE provider = ?",
-        provider,
-      )
-      .toArray()[0];
-    return row?.access_token;
-  }
-}
 
 const GmailSearchSchema = obj({
   query: str(),
@@ -95,18 +37,16 @@ const CalendarListEventsSchema = obj({
 });
 
 function encodeBase64Url(input: string): string {
-  return toBase64(new TextEncoder().encode(input))
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  return Buffer.from(input, "utf8").toString("base64url");
 }
 
 export function createConnectorsExtension(
-  store: ConnectorStore,
+  secrets: SecretsFacetStore,
   fetcher: HttpFetcher = (input, init) => fetch(input, init),
 ): Extension {
-  const resolveToken = (provider: ConnectorProvider): string | undefined =>
-    store.getAccessToken(provider);
+  const resolveToken = (
+    provider: ConnectorProvider,
+  ): Promise<string | undefined> => secrets.getConnectorAccessToken(provider);
 
   const gmailBase = () => GMAIL_API_BASE;
   const calendarBase = () => CALENDAR_API_BASE;

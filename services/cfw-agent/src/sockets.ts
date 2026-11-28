@@ -24,7 +24,6 @@ import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
 import type { BrowserTakeoverRecord } from "./browser";
 import type { CommandResult, ServerMessage } from "./protocol";
 
-const OPEN = 1;
 const SESSION_TAG_PREFIX = "pi-session:";
 const EXP_TAG_PREFIX = "pi-exp:";
 export const ACCESS_TOKEN_EXP_HEADER = "X-Access-Token-Exp";
@@ -84,7 +83,7 @@ function resumeAfter(view: ConversationView): ConversationWindow {
 }
 
 function send(socket: WebSocket, message: ServerMessage): void {
-  if (socket.readyState !== OPEN) {
+  if (socket.readyState !== WebSocket.OPEN) {
     return;
   }
   try {
@@ -268,7 +267,7 @@ export class AgentSockets {
     window: ConversationWindow = {},
   ): Promise<void> {
     const watch = await this.#harness.session(session).watch(window);
-    if (socket.readyState !== OPEN) {
+    if (socket.readyState !== WebSocket.OPEN) {
       await watch.stop();
       return;
     }
@@ -283,7 +282,7 @@ export class AgentSockets {
       if (call.kind !== "value") {
         return;
       }
-      if (socket.readyState !== OPEN) {
+      if (socket.readyState !== WebSocket.OPEN) {
         void this.#unwatch(socket);
         return;
       }
@@ -322,7 +321,7 @@ export class AgentSockets {
       return;
     }
     this.#watches.delete(socket);
-    if (socket.readyState !== OPEN || end.kind === "stopped") {
+    if (socket.readyState !== WebSocket.OPEN || end.kind === "stopped") {
       return;
     }
     await this.#watchOrClose(socket, session, resumeAfter(last));

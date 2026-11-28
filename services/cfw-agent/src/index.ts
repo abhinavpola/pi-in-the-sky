@@ -17,7 +17,7 @@ import {
   createBrowserExtension,
   createPuppeteerBrowserExecutor,
 } from "./browser";
-import { ConnectorStore, createConnectorsExtension } from "./connectors";
+import { createConnectorsExtension } from "./connectors";
 import { createExtensionsExtension } from "./extensions";
 import {
   forwardToDurableObject,
@@ -27,24 +27,28 @@ import {
 import type { HttpFetcher } from "./http-tool";
 import { createMemoryExtension, MemoryStore } from "./memory";
 import { createNearAiProvider, DEFAULT_NEARAI_MODEL } from "./providers";
-import { createSkillsExtension } from "./skills";
+import { SecretsFacetStore } from "./secrets-facet";
 import { AgentSockets } from "./sockets";
+import { createSqliteExtension } from "./sqlite-tool";
 
 const SYSTEM_PREAMBLE = [
   "You are a private, autonomous personal AI assistant running durably on Cloudflare with attested TEE inference.",
   "This is one continuous conversation with your user—never ask them to pick a thread or start a new chat.",
   "For multi-step or backgroundable tasks (trip research, inbox triage, bookings, monitoring), call activity_spawn to launch a dedicated subagent session so the main stream stays responsive.",
   "When the user sends a follow-up that could apply to more than one active activity, ask a brief clarifying question before steering.",
-  "Use your memory tools to recall and update durable user preferences and dated notes.",
-  "Use load_skill when a relevant bundled playbook exists.",
+  "Use sqlite_query to read and update durable user preferences (user_profile), dated notes (memory_notes), and conversation history.",
+  "Use read_file on skills/<name>/SKILL.md when a relevant built-in or custom skill exists.",
   "Ask the user in chat for permission whenever an action is irreversible, involves spending money, or sends external communications.",
   "If a website requires sign-in, CAPTCHA, or MFA, call browser_request_takeover so the user can complete it in Live View.",
-  "When you need a reusable custom feature, tool, skill, or stateful handler, write TypeScript/Markdown files into your extension/ workspace via extension_write_file (Cloudflare Artifacts) and execute them in a Dynamic Worker (or Durable Object facet for persistent per-feature SQLite state) via extension_run.",
+  "When you need a reusable custom feature, tool, skill, or stateful handler, write TypeScript/Markdown files into your extension/ workspace via write_file (Cloudflare Artifacts) and execute them in a Dynamic Worker (or Durable Object facet for persistent per-feature SQLite state) via run_module.",
 ].join("\n");
 
 export class PersonalAgent extends DurableObject<Env> {
   readonly memory = new MemoryStore(this.ctx.storage.sql);
-  readonly connectors = new ConnectorStore(this.ctx.storage.sql);
+  readonly secrets = new SecretsFacetStore(
+    () => this.env.LOADER,
+    () => this.ctx.facets,
+  );
   readonly browser = new BrowserStore(this.ctx.storage.sql);
   readonly activities = new ActivityStore(this.ctx.storage.sql);
   readonly registry = createRegistry();
@@ -105,7 +109,7 @@ export class PersonalAgent extends DurableObject<Env> {
         refreshToken,
         expiresAt,
       ) => {
-        this.connectors.setToken(
+        await this.secrets.setConnectorToken(
           provider,
           accessToken,
           refreshToken,
@@ -161,14 +165,14 @@ export class PersonalAgent extends DurableObject<Env> {
       ],
     });
     this.registry.install(createMemoryExtension(this.memory));
-    this.registry.install(createSkillsExtension());
+    this.registry.install(createSqliteExtension(this.ctx.storage.sql));
     this.registry.install(
       createActivitiesExtension(this.activities, this.harness, (record) => {
         this.sockets.broadcastActivity(record);
       }),
     );
     this.registry.install(
-      createConnectorsExtension(this.connectors, this.createFetcher()),
+      createConnectorsExtension(this.secrets, this.createFetcher()),
     );
     this.registry.install(
       createBrowserExtension(

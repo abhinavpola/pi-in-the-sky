@@ -6,6 +6,7 @@ out
 dist
 *.tgz
 packages/client/generated
+services/cfw-agent/src/generated
 
 # code coverage
 coverage

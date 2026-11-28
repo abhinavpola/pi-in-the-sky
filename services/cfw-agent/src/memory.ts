@@ -1,8 +1,5 @@
-import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
-import { num, obj, opt, str } from "@earendil-works/pi-schema";
+import type { Extension } from "@earendil-works/pi-durable";
 import type { MemoryNote, ProfileEntry } from "@pi-in-the-sky/client/protocol";
-
-import { jsonToolResult } from "./http-tool";
 
 type ProfileRow = {
   key: string;
@@ -155,76 +152,9 @@ export class MemoryStore {
   }
 }
 
-const EmptySchema = obj({});
-
-const SetProfileSchema = obj({
-  key: str(),
-  value: str(),
-});
-
-const WriteNoteSchema = obj({
-  content: str(),
-  category: opt(str()),
-  date: opt(str()),
-});
-
-const SearchMemorySchema = obj({
-  query: str(),
-  limit: opt(num()),
-});
-
 export function createMemoryExtension(store: MemoryStore): Extension {
-  const getProfileTool: ToolRegistration<typeof EmptySchema> = {
-    name: "memory_get_profile",
-    description:
-      "Read all stored user profile facts (standing preferences like home_airport, airline_loyalty, timezone, seat_preference).",
-    parameters: EmptySchema,
-    replay: "safe",
-    async execute() {
-      return jsonToolResult({ entries: store.getProfile() });
-    },
-  };
-
-  const setProfileTool: ToolRegistration<typeof SetProfileSchema> = {
-    name: "memory_set_profile",
-    description:
-      "Upsert a standing user profile preference or fact so future conversations remember it.",
-    parameters: SetProfileSchema,
-    replay: "safe",
-    async execute({ key, value }) {
-      return jsonToolResult(store.setProfileEntry(key, value));
-    },
-  };
-
-  const writeNoteTool: ToolRegistration<typeof WriteNoteSchema> = {
-    name: "memory_write_note",
-    description:
-      "Save a dated note (trips, bookings, decisions, follow-ups) to long-term memory.",
-    parameters: WriteNoteSchema,
-    replay: "safe",
-    async execute({ content, category, date }) {
-      return jsonToolResult(
-        store.addNote(content, category ?? "general", date),
-      );
-    },
-  };
-
-  const searchMemoryTool: ToolRegistration<typeof SearchMemorySchema> = {
-    name: "memory_search",
-    description:
-      "Search dated memory notes for past trips, preferences, bookings, and facts.",
-    parameters: SearchMemorySchema,
-    replay: "safe",
-    async execute({ query, limit }) {
-      return jsonToolResult({
-        notes: store.searchNotes(query, limit ?? 10),
-      });
-    },
-  };
-
   return {
     name: "memory",
-    tools: [getProfileTool, setProfileTool, writeNoteTool, searchMemoryTool],
     sections: [
       {
         key: "user-profile",

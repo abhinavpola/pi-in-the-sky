@@ -2,6 +2,10 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { bundleBuiltinExtension } from "./bundle-builtin-extension";
+
+await bundleBuiltinExtension();
+
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const workerDir = path.join(repoRoot, "services", "cfw-agent");
 const outputDir = path.join(repoRoot, "packages", "client", "generated");

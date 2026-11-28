@@ -263,7 +263,7 @@ describe("cfw-agent workerd integration", () => {
     ).toBeNull();
   });
 
-  it("plans a repeat trip over WebSocket with zero plaintext prompts, completions, notes, or tokens in SQLite", async () => {
+  it("plans a repeat trip over WebSocket using built-in skill read_file, sqlite_query, and host-isolated SecretsFacet tokens", async () => {
     const secretHomeAirport = "SFO-PRIVATE-AIRPORT-991";
     const secretOauthToken = "ya29.super-secret-oauth-token-xyz";
     const secretPromptPhrase = "SECRET_TOKYO_PROMPT_CANARY_42";
@@ -275,13 +275,22 @@ describe("cfw-agent workerd integration", () => {
         toolCalls: [
           {
             id: "tc-skill",
-            name: "load_skill",
-            arguments: { name: "flight-planning" },
+            name: "read_file",
+            arguments: { path: "skills/flight-planning/SKILL.md" },
           },
           {
             id: "tc-profile",
-            name: "memory_get_profile",
-            arguments: {},
+            name: "sqlite_query",
+            arguments: {
+              sql: "SELECT key, value FROM user_profile ORDER BY key ASC",
+            },
+          },
+          {
+            id: "tc-tables",
+            name: "sqlite_query",
+            arguments: {
+              sql: "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name ASC",
+            },
           },
         ],
       },
@@ -329,10 +338,15 @@ describe("cfw-agent workerd integration", () => {
         toolCalls: [
           {
             id: "tc-write-note",
-            name: "memory_write_note",
+            name: "sqlite_query",
             arguments: {
-              category: "travel",
-              content: "Planned Tokyo Oct 12-20 2026 on ANA NH7 ($1,120).",
+              sql: "INSERT INTO memory_notes (date, category, content, created_at) VALUES (?, ?, ?, ?)",
+              params: [
+                "2026-10-12",
+                "travel",
+                "Planned Tokyo Oct 12-20 2026 on ANA NH7 ($1,120).",
+                Date.now(),
+              ],
             },
           },
         ],
@@ -373,12 +387,18 @@ describe("cfw-agent workerd integration", () => {
       input: `${secretPromptPhrase} Look up my Tokyo trip from last year and plan the same trip.`,
     });
 
-    await nextSocketMessage(
+    const finalView = await nextSocketMessage(
       ws,
       (m) => m.type === "view" && JSON.stringify(m).includes(secretReplyPhrase),
       "final assistant message",
       10_000,
     );
+    const serializedView = JSON.stringify(finalView);
+    expect(serializedView).toContain("Flight & Trip Planning");
+    expect(serializedView).toContain("user_profile");
+    expect(serializedView).not.toContain("connector_tokens");
+    expect(serializedView).not.toContain(secretOauthToken);
+    expect(serializedView).not.toContain('"isError":true');
 
     const searchResult = await wsRpc(ws, {
       type: "search_notes",

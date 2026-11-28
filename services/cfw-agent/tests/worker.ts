@@ -21,6 +21,30 @@ export class TestPersonalAgent extends PersonalAgent {
     scriptedQueues.set(key, [...turns]);
   }
 
+  async listSchedules(): Promise<
+    readonly { readonly id: string; readonly type: string }[]
+  > {
+    const items = await this.schedules.list();
+    return items.map((item) => ({ id: item.id, type: item.type }));
+  }
+
+  async cancelSchedule(id: string): Promise<boolean> {
+    return this.schedules.cancel(id);
+  }
+
+  async runExtensionModule(
+    path: string,
+    facet?: string,
+    className?: string,
+  ): Promise<{ readonly ok: boolean; readonly outputJson: string }> {
+    const result = await this.extensionsRuntime.runModule({
+      path,
+      facet,
+      className,
+    });
+    return { ok: result.ok, outputJson: JSON.stringify(result.output) };
+  }
+
   protected override createModelRegistry(): { models: MutableModels } {
     const models = createModels();
     models.setProvider(

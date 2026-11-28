@@ -4,6 +4,7 @@ import { AuthConfigResponseSchema } from "@pi-in-the-sky/client/protocol";
 import { err, ok, type Result } from "@pi-in-the-sky/result-monad";
 import { PiHarness, type PiModel, ROOT_SESSION } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
+import { Scheduler } from "agents/schedules";
 import { WebSockets } from "agents/websockets";
 import { DurableObject } from "cloudflare:workers";
 
@@ -17,8 +18,9 @@ import {
   createBrowserExtension,
   createPuppeteerBrowserExecutor,
 } from "./browser";
+import { ConnectorBridge } from "./connector-bridge";
 import { createConnectorsExtension } from "./connectors";
-import { createExtensionsExtension } from "./extensions";
+import { createExtensionsRuntime } from "./extensions";
 import {
   forwardToDurableObject,
   hasWorkerBearerAuth,
@@ -27,6 +29,12 @@ import {
 import type { HttpFetcher } from "./http-tool";
 import { createMemoryExtension, MemoryStore } from "./memory";
 import { createNearAiProvider, DEFAULT_NEARAI_MODEL } from "./providers";
+import {
+  createSchedulesExtension,
+  type PersonalScheduler,
+  type ScheduleModulePayload,
+  type SchedulePromptPayload,
+} from "./schedules";
 import { SecretsFacetStore } from "./secrets-facet";
 import { AgentSockets } from "./sockets";
 import { createSqliteExtension } from "./sqlite-tool";
@@ -122,11 +130,56 @@ export class PersonalAgent extends DurableObject<Env> {
 
   readonly webSockets = new WebSockets(this.sockets.options());
 
+  readonly extensionsRuntime = createExtensionsRuntime({
+    getArtifacts: () => this.env.ARTIFACTS,
+    getLoader: () => this.env.LOADER,
+    getFacets: () => this.ctx.facets,
+    getConnectorBridge: () => this.#getConnectorBridge(),
+    agentScope: this.ctx.id.toString(),
+  });
+
+  readonly schedules: PersonalScheduler = new Scheduler({
+    callbacks: {
+      runPrompt: async (payload: SchedulePromptPayload) => {
+        const id = `act-${crypto.randomUUID().slice(0, 8)}`;
+        const sessionId = `scheduled-${id}`;
+        const record = this.activities.createActivity({
+          id,
+          title: payload.title,
+          sessionId,
+          summary: payload.prompt.slice(0, 160),
+        });
+        this.sockets.broadcastActivity(record);
+        await this.harness.session(sessionId).submit(payload.prompt);
+      },
+      runModule: async (payload: ScheduleModulePayload) => {
+        await this.extensionsRuntime.runModule({
+          path: payload.path,
+          input: payload.input,
+          facet: payload.facet,
+          className: payload.className,
+        });
+      },
+    },
+  });
+
   readonly lifecycle = Lifecycle.install(this)
     .use(this.webSockets)
-    .use(this.harness);
+    .use(this.harness)
+    .use(this.schedules);
 
   #extensionsInstalled = false;
+  #connectorBridge: ConnectorBridge | undefined;
+
+  #getConnectorBridge(): ConnectorBridge {
+    if (!this.#connectorBridge) {
+      this.#connectorBridge = new ConnectorBridge(
+        this.secrets,
+        this.createFetcher(),
+      );
+    }
+    return this.#connectorBridge;
+  }
 
   protected createModelRegistry(): { models: MutableModels } {
     const models = createModels();
@@ -172,8 +225,9 @@ export class PersonalAgent extends DurableObject<Env> {
       }),
     );
     this.registry.install(
-      createConnectorsExtension(this.secrets, this.createFetcher()),
+      createConnectorsExtension(this.extensionsRuntime.runModule),
     );
+    this.registry.install(createSchedulesExtension(this.schedules));
     this.registry.install(
       createBrowserExtension(
         this.browser,
@@ -183,14 +237,7 @@ export class PersonalAgent extends DurableObject<Env> {
         },
       ),
     );
-    this.registry.install(
-      createExtensionsExtension(
-        () => this.env.ARTIFACTS,
-        () => this.env.LOADER,
-        () => this.ctx.facets,
-        this.ctx.id.toString(),
-      ),
-    );
+    this.registry.install(this.extensionsRuntime.extension);
   }
 
   async onStart(): Promise<void> {

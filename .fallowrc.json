@@ -2,7 +2,8 @@
   "entry": [
     "lint/*.js",
     "projects/macos/metro.config.js",
-    "scripts/bundle-worker.ts"
+    "scripts/bundle-worker.ts",
+    "services/cfw-agent/extension/tools/*.ts"
   ],
   "ignoreDependencies": ["@babel/runtime", "react-native-macos"],
   "rules": {

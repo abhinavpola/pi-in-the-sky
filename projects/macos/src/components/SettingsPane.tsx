@@ -28,6 +28,16 @@ type SettingsPaneProps = {
   readonly onOffboard: () => void;
 };
 
+type SettingsActionState =
+  | { readonly kind: "idle" }
+  | { readonly kind: "busy"; readonly message: string }
+  | {
+      readonly kind: "awaiting_destroy_approval";
+      readonly auth: CloudflareDeviceAuth;
+      readonly message: string;
+    }
+  | { readonly kind: "error"; readonly message: string };
+
 export function SettingsPane({
   config,
   connectionState,
@@ -36,11 +46,9 @@ export function SettingsPane({
   onSignOut,
   onOffboard,
 }: SettingsPaneProps) {
-  const [errorText, setErrorText] = useState<string | null>(null);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [destroyAuth, setDestroyAuth] = useState<CloudflareDeviceAuth | null>(
-    null,
-  );
+  const [actionState, setActionState] = useState<SettingsActionState>({
+    kind: "idle",
+  });
   const destroyAbortRef = useRef<AbortController | null>(null);
   const destroyEpochRef = useRef(0);
 
@@ -51,41 +59,43 @@ export function SettingsPane({
     };
   }, []);
 
+  const isBusy =
+    actionState.kind === "busy" ||
+    actionState.kind === "awaiting_destroy_approval";
+
   const cancelDestroy = () => {
     destroyEpochRef.current += 1;
     destroyAbortRef.current?.abort();
     destroyAbortRef.current = null;
-    setDestroyAuth(null);
-    setStatusMessage(null);
+    setActionState({ kind: "idle" });
   };
 
   const handleSignIn = async () => {
     const epoch = getSessionEpoch();
-    setErrorText(null);
-    setStatusMessage("Connecting...");
+    setActionState({ kind: "busy", message: "Connecting..." });
     const status = await fetchWorkerStatus(config.baseUrl);
     switch (status.kind) {
       case "offline":
-        setStatusMessage(null);
-        setErrorText(status.reason);
+        setActionState({ kind: "error", message: status.reason });
         return;
       case "live_no_oauth":
-        setStatusMessage(null);
-        setErrorText("Cloudflare Access is not configured.");
+        setActionState({
+          kind: "error",
+          message: "Cloudflare Access is not configured.",
+        });
         return;
       case "live_oauth_ready": {
         const result = await signInWithCloudflareAccess({
           baseUrl: status.baseUrl,
           teamDomain: status.teamDomain,
           clientId: status.clientId,
-          onStatus: setStatusMessage,
+          onStatus: (message) => setActionState({ kind: "busy", message }),
         });
         if (!result.ok) {
-          setStatusMessage(null);
-          setErrorText(result.error);
+          setActionState({ kind: "error", message: result.error });
           return;
         }
-        setStatusMessage(null);
+        setActionState({ kind: "idle" });
         onSave(result.value, epoch);
         return;
       }
@@ -104,19 +114,17 @@ export function SettingsPane({
       return;
     }
     const epoch = getSessionEpoch();
-    setErrorText(null);
-    setStatusMessage("Refreshing...");
+    setActionState({ kind: "busy", message: "Refreshing..." });
     const result = await refreshAccessToken(
       config.accessTeamDomain,
       config.accessClientId,
       config.refreshToken,
     );
     if (!result.ok) {
-      setStatusMessage(null);
-      setErrorText(result.error);
+      setActionState({ kind: "error", message: result.error });
       return;
     }
-    setStatusMessage(null);
+    setActionState({ kind: "idle" });
     onSave(
       {
         ...config,
@@ -128,27 +136,31 @@ export function SettingsPane({
   };
 
   const handleDestroyWorker = async () => {
-    if (statusMessage !== null) {
+    if (isBusy) {
       return;
     }
     destroyEpochRef.current += 1;
     const epoch = destroyEpochRef.current;
-    setErrorText(null);
-    setStatusMessage("Starting Cloudflare approval...");
+    setActionState({
+      kind: "busy",
+      message: "Starting Cloudflare approval...",
+    });
     const started = await startCloudflareDeviceAuth();
     if (destroyEpochRef.current !== epoch) {
       return;
     }
     if (!started.ok) {
-      setStatusMessage(null);
-      setErrorText(started.error);
+      setActionState({ kind: "error", message: started.error });
       return;
     }
     destroyAbortRef.current?.abort();
     const controller = new AbortController();
     destroyAbortRef.current = controller;
-    setDestroyAuth(started.value);
-    setStatusMessage("Approve in Cloudflare to destroy Worker...");
+    setActionState({
+      kind: "awaiting_destroy_approval",
+      auth: started.value,
+      message: "Approve in Cloudflare to destroy Worker...",
+    });
     await Linking.openURL(started.value.verificationUriComplete);
 
     const polled = await pollCloudflareDeviceToken(
@@ -158,36 +170,34 @@ export function SettingsPane({
     if (controller.signal.aborted || destroyEpochRef.current !== epoch) {
       return;
     }
-    setDestroyAuth(null);
     if (!polled.ok) {
-      setStatusMessage(null);
-      setErrorText(polled.error);
+      setActionState({ kind: "error", message: polled.error });
       return;
     }
-    setStatusMessage("Locating Worker...");
+    setActionState({ kind: "busy", message: "Locating Worker..." });
     const discovery = await discoverCloudflareWorker(polled.accessToken);
     if (destroyEpochRef.current !== epoch) {
       return;
     }
     switch (discovery.kind) {
       case "error":
-        setStatusMessage(null);
-        setErrorText(discovery.message);
+        setActionState({ kind: "error", message: discovery.message });
         return;
       case "not_deployed": {
-        setStatusMessage("Checking Worker status...");
+        setActionState({ kind: "busy", message: "Checking Worker status..." });
         const liveStatus = await fetchWorkerStatus(config.baseUrl);
         if (destroyEpochRef.current !== epoch) {
           return;
         }
         if (liveStatus.kind !== "offline") {
-          setStatusMessage(null);
-          setErrorText(
-            "Signed into a Cloudflare account that does not own this Worker.",
-          );
+          setActionState({
+            kind: "error",
+            message:
+              "Signed into a Cloudflare account that does not own this Worker.",
+          });
           return;
         }
-        setStatusMessage(null);
+        setActionState({ kind: "idle" });
         onOffboard();
         return;
       }
@@ -198,11 +208,16 @@ export function SettingsPane({
             item.baseUrl.trim().replace(/\/$/, "") === normalizedBaseUrl,
         );
         if (!target) {
-          setStatusMessage(null);
-          setErrorText("No deployed Worker matched this server URL.");
+          setActionState({
+            kind: "error",
+            message: "No deployed Worker matched this server URL.",
+          });
           return;
         }
-        setStatusMessage(`Destroying Worker in ${target.accountName}...`);
+        setActionState({
+          kind: "busy",
+          message: `Destroying Worker in ${target.accountName}...`,
+        });
         const destroyed = await destroyCloudflareWorker(
           polled.accessToken,
           target.accountId,
@@ -211,11 +226,10 @@ export function SettingsPane({
           return;
         }
         if (!destroyed.ok) {
-          setStatusMessage(null);
-          setErrorText(destroyed.error);
+          setActionState({ kind: "error", message: destroyed.error });
           return;
         }
-        setStatusMessage(null);
+        setActionState({ kind: "idle" });
         onOffboard();
         return;
       }
@@ -225,8 +239,50 @@ export function SettingsPane({
     }
   };
 
+  const renderActionFeedback = (current: SettingsActionState) => {
+    switch (current.kind) {
+      case "idle":
+        return null;
+      case "busy":
+        return <Text style={styles.status}>{current.message}</Text>;
+      case "error":
+        return <Text style={styles.error}>{current.message}</Text>;
+      case "awaiting_destroy_approval":
+        return (
+          <>
+            <View style={styles.verifyCard}>
+              <Text style={styles.verifyTitle}>Approve in Cloudflare</Text>
+              <Text style={styles.verifyCode}>{current.auth.userCode}</Text>
+              <View style={styles.actions}>
+                <Pressable
+                  style={styles.secondaryButton}
+                  onPress={() => {
+                    void Linking.openURL(current.auth.verificationUriComplete);
+                  }}
+                >
+                  <Text style={styles.secondaryButtonText}>
+                    Open Cloudflare
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={styles.secondaryButton}
+                  onPress={cancelDestroy}
+                >
+                  <Text style={styles.secondaryButtonText}>Cancel</Text>
+                </Pressable>
+              </View>
+            </View>
+            <Text style={styles.status}>{current.message}</Text>
+          </>
+        );
+      default: {
+        current satisfies never;
+        return null;
+      }
+    }
+  };
+
   const isSignedIn = config.authToken.trim().length > 0;
-  const isBusy = statusMessage !== null;
 
   return (
     <View style={styles.container}>
@@ -293,31 +349,7 @@ export function SettingsPane({
           )}
         </View>
 
-        {destroyAuth ? (
-          <View style={styles.verifyCard}>
-            <Text style={styles.verifyTitle}>Approve in Cloudflare</Text>
-            <Text style={styles.verifyCode}>{destroyAuth.userCode}</Text>
-            <View style={styles.actions}>
-              <Pressable
-                style={styles.secondaryButton}
-                onPress={() => {
-                  void Linking.openURL(destroyAuth.verificationUriComplete);
-                }}
-              >
-                <Text style={styles.secondaryButtonText}>Open Cloudflare</Text>
-              </Pressable>
-              <Pressable style={styles.secondaryButton} onPress={cancelDestroy}>
-                <Text style={styles.secondaryButtonText}>Cancel</Text>
-              </Pressable>
-            </View>
-          </View>
-        ) : null}
-
-        {errorText ? (
-          <Text style={styles.error}>{errorText}</Text>
-        ) : statusMessage ? (
-          <Text style={styles.status}>{statusMessage}</Text>
-        ) : null}
+        {renderActionFeedback(actionState)}
       </View>
     </View>
   );

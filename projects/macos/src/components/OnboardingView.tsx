@@ -1,7 +1,6 @@
 import type { ConnectionConfig } from "@pi-in-the-sky/client/agent-client";
 import {
   type CloudflareAccount,
-  type CloudflareDeviceAuth,
   pollCloudflareDeviceToken,
   startCloudflareDeviceAuth,
 } from "@pi-in-the-sky/client/cloudflare-device-auth";
@@ -21,7 +20,7 @@ import {
   DeployWorkerCard,
   SelectAccountCard,
 } from "./OnboardingCloudflareCards";
-import { type OnboardingStep, OnboardingStepper } from "./OnboardingStepper";
+import { type OnboardingState, OnboardingStepper } from "./OnboardingStepper";
 import { onboardingStyles } from "./OnboardingView.styles";
 
 type OnboardingViewProps = {
@@ -29,24 +28,8 @@ type OnboardingViewProps = {
 };
 
 export function OnboardingView({ onComplete }: OnboardingViewProps) {
-  const [step, setStep] = useState<OnboardingStep>("cf_connect");
+  const [state, setState] = useState<OnboardingState>({ kind: "cf_connect" });
   const [nearAiApiKey, setNearAiApiKey] = useState("");
-  const [cfAccessToken, setCfAccessToken] = useState("");
-  const [deviceAuth, setDeviceAuth] = useState<CloudflareDeviceAuth | null>(
-    null,
-  );
-  const [matchedWorkers, setMatchedWorkers] = useState<
-    readonly DiscoveredWorker[]
-  >([]);
-  const [deployableAccounts, setDeployableAccounts] = useState<
-    readonly CloudflareAccount[]
-  >([]);
-  const [selectedWorker, setSelectedWorker] = useState<DiscoveredWorker | null>(
-    null,
-  );
-  const [workerUrl, setWorkerUrl] = useState("");
-  const [teamDomain, setTeamDomain] = useState("");
-  const [clientId, setClientId] = useState("");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
   const pollAbortRef = useRef<AbortController | null>(null);
@@ -60,15 +43,6 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
       pollAbortRef.current?.abort();
     };
   }, []);
-
-  const clearSetupState = () => {
-    setCfAccessToken("");
-    setNearAiApiKey("");
-    setMatchedWorkers([]);
-    setDeployableAccounts([]);
-    setSelectedWorker(null);
-    setStatusMessage(null);
-  };
 
   const verifyLiveWorker = async (
     candidateUrl: string,
@@ -86,18 +60,22 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
         setErrorText(status.reason);
         return;
       case "live_no_oauth":
-        clearSetupState();
+        setNearAiApiKey("");
+        setStatusMessage(null);
         onComplete({
           baseUrl: status.baseUrl,
           authToken: agentAuthToken,
         });
         return;
       case "live_oauth_ready":
-        clearSetupState();
-        setWorkerUrl(status.baseUrl);
-        setTeamDomain(status.teamDomain);
-        setClientId(status.clientId);
-        setStep("access_login");
+        setNearAiApiKey("");
+        setStatusMessage(null);
+        setState({
+          kind: "access_login",
+          workerUrl: status.baseUrl,
+          teamDomain: status.teamDomain,
+          clientId: status.clientId,
+        });
         return;
       default: {
         status satisfies never;
@@ -108,6 +86,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
   const deployToAccount = async (
     token: string,
     account: CloudflareAccount,
+    accounts: readonly CloudflareAccount[],
     epoch: number,
   ) => {
     if (flowEpochRef.current !== epoch || busyRef.current) {
@@ -128,14 +107,16 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
       if (!deployed.ok) {
         setStatusMessage(null);
         setErrorText(deployed.error);
-        setStep("cf_deploy");
+        setState({ kind: "cf_deploy", cfAccessToken: token, accounts });
         return;
       }
-      setSelectedWorker(deployed.worker);
-      setMatchedWorkers([]);
-      setDeployableAccounts([]);
       setStatusMessage(null);
-      setStep("provider");
+      setState({
+        kind: "provider",
+        cfAccessToken: token,
+        worker: deployed.worker,
+        fallbackWorkers: [],
+      });
     } finally {
       busyRef.current = false;
     }
@@ -159,31 +140,35 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
           discovery.matches.length === 1 &&
           single
         ) {
-          setSelectedWorker(single);
-          setMatchedWorkers([]);
-          setDeployableAccounts([]);
           setStatusMessage(null);
-          setStep("provider");
+          setState({
+            kind: "provider",
+            cfAccessToken: token,
+            worker: single,
+            fallbackWorkers: [],
+          });
           return;
         }
-        setMatchedWorkers(discovery.matches);
-        setDeployableAccounts([]);
-        setSelectedWorker(null);
         setStatusMessage(null);
-        setStep("cf_select_account");
+        setState({
+          kind: "cf_select_account",
+          cfAccessToken: token,
+          workers: discovery.matches,
+        });
         return;
       }
       case "not_deployed":
-        setMatchedWorkers([]);
-        setDeployableAccounts(discovery.deployableAccounts);
-        setSelectedWorker(null);
         setStatusMessage(null);
-        setStep("cf_deploy");
+        setState({
+          kind: "cf_deploy",
+          cfAccessToken: token,
+          accounts: discovery.deployableAccounts,
+        });
         return;
       case "error":
         setStatusMessage(null);
         setErrorText(discovery.message);
-        setStep("cf_connect");
+        setState({ kind: "cf_connect" });
         return;
       default: {
         discovery satisfies never;
@@ -211,9 +196,8 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
     pollAbortRef.current?.abort();
     const controller = new AbortController();
     pollAbortRef.current = controller;
-    setDeviceAuth(started.value);
     setStatusMessage("Waiting for approval...");
-    setStep("cf_verify");
+    setState({ kind: "cf_verify", deviceAuth: started.value });
     await Linking.openURL(started.value.verificationUriComplete);
 
     const polled = await pollCloudflareDeviceToken(
@@ -226,23 +210,17 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
     if (!polled.ok) {
       setStatusMessage(null);
       setErrorText(polled.error);
-      setStep("cf_connect");
+      setState({ kind: "cf_connect" });
       return;
     }
-    setCfAccessToken(polled.accessToken);
     await discoverWorker(polled.accessToken, epoch);
   };
 
-  const handleConfigureProvider = async () => {
-    if (!nearAiApiKey.trim()) {
-      return;
-    }
-    if (!selectedWorker || !cfAccessToken) {
-      setErrorText("Sign in with Cloudflare first.");
-      setStep("cf_connect");
-      return;
-    }
-    if (busyRef.current) {
+  const handleConfigureProvider = async (
+    cfAccessToken: string,
+    worker: DiscoveredWorker,
+  ) => {
+    if (!nearAiApiKey.trim() || busyRef.current) {
       return;
     }
     const epoch = flowEpochRef.current;
@@ -261,7 +239,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
       }
       const provisioned = await provisionWorkerSecrets(
         cfAccessToken,
-        selectedWorker.accountId,
+        worker.accountId,
         nearAiApiKey,
         tokenRes.value,
       );
@@ -273,8 +251,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
         setErrorText(provisioned.error);
         return;
       }
-      setWorkerUrl(selectedWorker.baseUrl);
-      await verifyLiveWorker(selectedWorker.baseUrl, epoch, tokenRes.value);
+      await verifyLiveWorker(worker.baseUrl, epoch, tokenRes.value);
     } finally {
       busyRef.current = false;
     }
@@ -285,13 +262,17 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
     busyRef.current = false;
     pollAbortRef.current?.abort();
     pollAbortRef.current = null;
-    setDeviceAuth(null);
-    clearSetupState();
+    setNearAiApiKey("");
+    setStatusMessage(null);
     setErrorText(null);
-    setStep("cf_connect");
+    setState({ kind: "cf_connect" });
   };
 
-  const handleAccessLogin = async () => {
+  const handleAccessLogin = async (
+    workerUrl: string,
+    teamDomain: string,
+    clientId: string,
+  ) => {
     setErrorText(null);
     const result = await signInWithCloudflareAccess({
       baseUrl: workerUrl,
@@ -308,8 +289,8 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
     onComplete(result.value);
   };
 
-  const renderStep = (current: OnboardingStep) => {
-    switch (current) {
+  const renderState = (current: OnboardingState) => {
+    switch (current.kind) {
       case "cf_connect":
         return (
           <View style={onboardingStyles.card}>
@@ -337,25 +318,23 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
             <Text style={onboardingStyles.cardBody}>
               Confirm this code in Cloudflare to continue.
             </Text>
-            {deviceAuth ? (
-              <View style={onboardingStyles.codeBox}>
-                <Text style={onboardingStyles.codeText}>
-                  {deviceAuth.userCode}
-                </Text>
-              </View>
-            ) : null}
-            {deviceAuth ? (
-              <Pressable
-                style={onboardingStyles.secondaryButton}
-                onPress={() => {
-                  void Linking.openURL(deviceAuth.verificationUriComplete);
-                }}
-              >
-                <Text style={onboardingStyles.secondaryButtonText}>
-                  Open Cloudflare
-                </Text>
-              </Pressable>
-            ) : null}
+            <View style={onboardingStyles.codeBox}>
+              <Text style={onboardingStyles.codeText}>
+                {current.deviceAuth.userCode}
+              </Text>
+            </View>
+            <Pressable
+              style={onboardingStyles.secondaryButton}
+              onPress={() => {
+                void Linking.openURL(
+                  current.deviceAuth.verificationUriComplete,
+                );
+              }}
+            >
+              <Text style={onboardingStyles.secondaryButtonText}>
+                Open Cloudflare
+              </Text>
+            </Pressable>
             <Pressable
               style={onboardingStyles.localLink}
               onPress={handleCancelFlow}
@@ -367,11 +346,15 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
       case "cf_select_account":
         return (
           <SelectAccountCard
-            workers={matchedWorkers}
+            workers={current.workers}
             onSelect={(match) => {
               setErrorText(null);
-              setSelectedWorker(match);
-              setStep("provider");
+              setState({
+                kind: "provider",
+                cfAccessToken: current.cfAccessToken,
+                worker: match,
+                fallbackWorkers: current.workers,
+              });
             }}
             onCancel={handleCancelFlow}
           />
@@ -379,11 +362,16 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
       case "cf_deploy":
         return (
           <DeployWorkerCard
-            accounts={deployableAccounts}
+            accounts={current.accounts}
             disabled={statusMessage !== null}
             onDeploy={(account) => {
               const epoch = flowEpochRef.current;
-              void deployToAccount(cfAccessToken, account, epoch);
+              void deployToAccount(
+                current.cfAccessToken,
+                account,
+                current.accounts,
+                epoch,
+              );
             }}
             onBack={handleCancelFlow}
           />
@@ -393,8 +381,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
           <View style={onboardingStyles.card}>
             <Text style={onboardingStyles.cardTitle}>Inference Provider</Text>
             <Text style={onboardingStyles.cardBody}>
-              Add your NEAR AI key for{" "}
-              {selectedWorker?.accountName ?? "Cloudflare"}.
+              Add your NEAR AI key for {current.worker.accountName}.
             </Text>
             <View style={onboardingStyles.field}>
               <Text style={onboardingStyles.label}>NEAR AI Key</Text>
@@ -407,7 +394,10 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
                 returnKeyType="done"
                 submitBehavior="blurAndSubmit"
                 onSubmitEditing={() => {
-                  void handleConfigureProvider();
+                  void handleConfigureProvider(
+                    current.cfAccessToken,
+                    current.worker,
+                  );
                 }}
                 placeholder="sk-..."
                 placeholderTextColor={THEME.textSecondary}
@@ -418,7 +408,10 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
                 style={onboardingStyles.primaryButton}
                 disabled={statusMessage !== null}
                 onPress={() => {
-                  void handleConfigureProvider();
+                  void handleConfigureProvider(
+                    current.cfAccessToken,
+                    current.worker,
+                  );
                 }}
               >
                 <Text style={onboardingStyles.primaryButtonText}>Continue</Text>
@@ -429,9 +422,12 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
               disabled={statusMessage !== null}
               onPress={() => {
                 setErrorText(null);
-                if (matchedWorkers.length > 0) {
-                  setSelectedWorker(null);
-                  setStep("cf_select_account");
+                if (current.fallbackWorkers.length > 0) {
+                  setState({
+                    kind: "cf_select_account",
+                    cfAccessToken: current.cfAccessToken,
+                    workers: current.fallbackWorkers,
+                  });
                   return;
                 }
                 handleCancelFlow();
@@ -445,11 +441,15 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
         return (
           <View style={onboardingStyles.card}>
             <Text style={onboardingStyles.cardTitle}>Sign In</Text>
-            <Text style={onboardingStyles.cardBody}>{teamDomain}</Text>
+            <Text style={onboardingStyles.cardBody}>{current.teamDomain}</Text>
             <Pressable
               style={onboardingStyles.primaryButton}
               onPress={() => {
-                void handleAccessLogin();
+                void handleAccessLogin(
+                  current.workerUrl,
+                  current.teamDomain,
+                  current.clientId,
+                );
               }}
             >
               <Text style={onboardingStyles.primaryButtonText}>
@@ -475,9 +475,9 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
           </Text>
         </View>
 
-        <OnboardingStepper step={step} />
+        <OnboardingStepper step={state.kind} />
 
-        {renderStep(step)}
+        {renderState(state)}
 
         {statusMessage ? (
           <Text style={onboardingStyles.status}>{statusMessage}</Text>

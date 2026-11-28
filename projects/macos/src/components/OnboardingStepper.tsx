@@ -1,14 +1,39 @@
+import type {
+  CloudflareAccount,
+  CloudflareDeviceAuth,
+} from "@pi-in-the-sky/client/cloudflare-device-auth";
+import type { DiscoveredWorker } from "@pi-in-the-sky/client/onboarding";
 import { Text, View } from "react-native";
 
 import { onboardingStyles } from "./OnboardingView.styles";
 
-export type OnboardingStep =
-  | "cf_connect"
-  | "cf_verify"
-  | "cf_select_account"
-  | "cf_deploy"
-  | "provider"
-  | "access_login";
+export type OnboardingState =
+  | { readonly kind: "cf_connect" }
+  | { readonly kind: "cf_verify"; readonly deviceAuth: CloudflareDeviceAuth }
+  | {
+      readonly kind: "cf_select_account";
+      readonly cfAccessToken: string;
+      readonly workers: readonly DiscoveredWorker[];
+    }
+  | {
+      readonly kind: "cf_deploy";
+      readonly cfAccessToken: string;
+      readonly accounts: readonly CloudflareAccount[];
+    }
+  | {
+      readonly kind: "provider";
+      readonly cfAccessToken: string;
+      readonly worker: DiscoveredWorker;
+      readonly fallbackWorkers: readonly DiscoveredWorker[];
+    }
+  | {
+      readonly kind: "access_login";
+      readonly workerUrl: string;
+      readonly teamDomain: string;
+      readonly clientId: string;
+    };
+
+type OnboardingStep = OnboardingState["kind"];
 
 function getOnboardingPhase(step: OnboardingStep): 1 | 2 {
   switch (step) {

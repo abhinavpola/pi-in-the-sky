@@ -12,6 +12,7 @@ import {
   ClientMessageSchema,
   type ConnectorProvider,
 } from "@pi-in-the-sky/client/protocol";
+import { err, ok, type Result } from "@pi-in-the-sky/result-monad";
 import {
   type PiHarness,
   type PiSessionId,
@@ -97,18 +98,18 @@ type SocketCallbacks = {
   readonly onResumeTakeover: (
     takeoverId: string,
     note?: string,
-  ) => Promise<CommandResult>;
+  ) => Promise<Result<CommandResult, string>>;
   readonly onClearWaitingTakeovers: (conversationId: number) => void;
   readonly listWaitingTakeovers: () => Promise<BrowserTakeoverRecord[]>;
   readonly listActivities: () => Promise<ActivityRecord[]>;
   readonly onSteerActivity: (
     activityId: string,
     instruction: string,
-  ) => Promise<CommandResult>;
+  ) => Promise<Result<CommandResult, string>>;
   readonly onToggleActivity: (
     activityId: string,
     collapsed: boolean,
-  ) => Promise<CommandResult>;
+  ) => Promise<Result<CommandResult, string>>;
   readonly onCompactThread: (summary: string) => Promise<CommandResult>;
   readonly onGetProfile: () => Promise<CommandResult>;
   readonly onSetProfile: (key: string, value: string) => Promise<CommandResult>;
@@ -360,8 +361,12 @@ export class AgentSockets {
     const msg = parsed.data;
     const session = sessionFromTags(connection.tags, ROOT_SESSION);
     try {
-      const result = await this.#handle(connection, session, msg);
-      send(connection, { type: "result", id: msg.id, result });
+      const outcome = await this.#handle(connection, session, msg);
+      if (!outcome.ok) {
+        send(connection, { type: "error", id: msg.id, message: outcome.error });
+        return;
+      }
+      send(connection, { type: "result", id: msg.id, result: outcome.value });
     } catch (thrown) {
       send(connection, {
         type: "error",
@@ -375,17 +380,19 @@ export class AgentSockets {
     connection: Connection,
     session: PiSessionId,
     msg: ClientMessage,
-  ): Promise<CommandResult> {
+  ): Promise<Result<CommandResult, string>> {
     switch (msg.type) {
       case "watch": {
         await this.#watch(connection, session, {});
-        return { watching: session };
+        return ok({ watching: session });
       }
       case "submit": {
-        return this.#harness.session(session).submit(msg.input, {
-          operationId: msg.operationId,
-          whenBusy: msg.whenBusy,
-        });
+        return ok(
+          await this.#harness.session(session).submit(msg.input, {
+            operationId: msg.operationId,
+            whenBusy: msg.whenBusy,
+          }),
+        );
       }
       case "abort": {
         const conversationId =
@@ -393,7 +400,7 @@ export class AgentSockets {
         if (conversationId !== undefined) {
           this.#callbacks.onClearWaitingTakeovers(Number(conversationId));
         }
-        return this.#harness.session(session).abort();
+        return ok(await this.#harness.session(session).abort());
       }
       case "reset": {
         const conversationId =
@@ -402,15 +409,15 @@ export class AgentSockets {
           this.#callbacks.onClearWaitingTakeovers(Number(conversationId));
         }
         await this.#harness.session(session).reset(msg.handoff);
-        return { ok: true };
+        return ok({ ok: true });
       }
       case "compact": {
-        return this.#callbacks.onCompactThread(msg.summary);
+        return ok(await this.#callbacks.onCompactThread(msg.summary));
       }
       case "entries": {
         const query: Omit<EntryQuery, "conversationId"> = msg.query ?? {};
         const limit = Math.max(1, Math.min(msg.limit, 200));
-        return this.#harness.session(session).entries(query, limit);
+        return ok(await this.#harness.session(session).entries(query, limit));
       }
       case "resume_takeover": {
         return this.#callbacks.onResumeTakeover(msg.takeoverId, msg.note);
@@ -422,28 +429,30 @@ export class AgentSockets {
         return this.#callbacks.onToggleActivity(msg.activityId, msg.collapsed);
       }
       case "get_profile": {
-        return this.#callbacks.onGetProfile();
+        return ok(await this.#callbacks.onGetProfile());
       }
       case "set_profile": {
-        return this.#callbacks.onSetProfile(msg.key, msg.value);
+        return ok(await this.#callbacks.onSetProfile(msg.key, msg.value));
       }
       case "search_notes": {
-        return this.#callbacks.onSearchNotes(msg.query, msg.limit);
+        return ok(await this.#callbacks.onSearchNotes(msg.query, msg.limit));
       }
       case "add_note": {
-        return this.#callbacks.onAddNote(msg.content, msg.category);
+        return ok(await this.#callbacks.onAddNote(msg.content, msg.category));
       }
       case "set_connector_token": {
-        return this.#callbacks.onSetConnectorToken(
-          msg.provider,
-          msg.accessToken,
-          msg.refreshToken,
-          msg.expiresAt,
+        return ok(
+          await this.#callbacks.onSetConnectorToken(
+            msg.provider,
+            msg.accessToken,
+            msg.refreshToken,
+            msg.expiresAt,
+          ),
         );
       }
       default: {
         msg satisfies never;
-        throw new Error("Unhandled client message");
+        return err("Unhandled client message");
       }
     }
   }

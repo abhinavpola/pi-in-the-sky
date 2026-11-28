@@ -251,6 +251,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
         setErrorText(provisioned.error);
         return;
       }
+      setNearAiApiKey("");
       await verifyLiveWorker(worker.baseUrl, epoch, tokenRes.value);
     } finally {
       busyRef.current = false;
@@ -391,6 +392,7 @@ export function OnboardingView({ onComplete }: OnboardingViewProps) {
                 onChangeText={setNearAiApiKey}
                 autoCapitalize="none"
                 autoCorrect={false}
+                secureTextEntry
                 returnKeyType="done"
                 submitBehavior="blurAndSubmit"
                 onSubmitEditing={() => {

@@ -21,7 +21,7 @@ import {
 import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
 
-import type { BrowserTakeoverRecord } from "./browser";
+import type { BrowserTakeoverRecord } from "./browser-store";
 import type { CommandResult, ServerMessage } from "./protocol";
 
 const SESSION_TAG_PREFIX = "pi-session:";

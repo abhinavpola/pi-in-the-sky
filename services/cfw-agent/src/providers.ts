@@ -261,7 +261,12 @@ export function createNearAiProvider(
           },
           signal ? { signal } : undefined,
         );
-        await client.verifyResponse(completion.id);
+        const verification = await client.verifyResponse(completion.id);
+        if (verification.signatureKind !== "provider_tee") {
+          throw new Error(
+            `NEAR AI response verification returned "${verification.signatureKind}" instead of "provider_tee".`,
+          );
+        }
         const choice = completion.choices[0];
         const content: Array<TextContent | ToolCall> = [];
         const text = choice?.message.content ?? "";

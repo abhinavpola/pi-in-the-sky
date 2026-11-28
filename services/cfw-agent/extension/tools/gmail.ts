@@ -58,6 +58,12 @@ export default {
             { status: 400 },
           );
         }
+        if (/[\r\n]/.test(input.to) || /[\r\n]/.test(input.subject)) {
+          return Response.json(
+            { error: "Gmail draft headers must not contain line breaks." },
+            { status: 400 },
+          );
+        }
         const rawMime = [
           `To: ${input.to}`,
           `Subject: ${input.subject}`,

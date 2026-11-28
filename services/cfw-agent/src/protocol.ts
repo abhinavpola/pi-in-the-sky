@@ -8,7 +8,7 @@ import type {
 import type { ActivityRecord } from "@pi-in-the-sky/client/protocol";
 import type { PiSessionId } from "agents/harness/pi";
 
-import type { BrowserTakeoverRecord } from "./browser";
+import type { BrowserTakeoverRecord } from "./browser-store";
 
 type ToolInfo = {
   readonly name: string;

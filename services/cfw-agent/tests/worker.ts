@@ -2,7 +2,7 @@ import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
 import { ok } from "@pi-in-the-sky/result-monad";
 import type { PiModel } from "agents/harness/pi";
 
-import type { BrowserExecutor } from "../src/browser";
+import type { BrowserExecutor, LiveViewUrlResolver } from "../src/browser";
 import type { HttpFetcher } from "../src/http-tool";
 import worker, { PersonalAgent } from "../src/index";
 import {
@@ -15,6 +15,7 @@ const scriptedQueues = new Map<string, ScriptedTurn[]>();
 
 export class TestPersonalAgent extends PersonalAgent {
   #scriptKey = "default";
+  readonly #pageUrls = new Map<string, string>();
 
   setScript(key: string, turns: ScriptedTurn[]): void {
     this.#scriptKey = key;
@@ -68,6 +69,7 @@ export class TestPersonalAgent extends PersonalAgent {
     return async (req) => {
       switch (req.action) {
         case "navigate":
+          this.#pageUrls.set(req.conversationId, req.url);
           return ok({
             ok: true,
             title: "ANA Flights - SFO to NRT",
@@ -82,12 +84,21 @@ export class TestPersonalAgent extends PersonalAgent {
           return ok({ clicked: req.selector });
         case "fill":
           return ok({ filled: req.selector });
+        case "current_page":
+          return ok({
+            url: this.#pageUrls.get(req.conversationId) ?? "about:blank",
+            sessionId: `test-session-${req.conversationId}`,
+          });
         default: {
           req satisfies never;
           return ok({});
         }
       }
     };
+  }
+
+  protected override createLiveViewUrlResolver(): LiveViewUrlResolver {
+    return ({ token }) => `https://live.browser.test/takeover/${token}`;
   }
 
   protected override createFetcher(): HttpFetcher {

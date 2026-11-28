@@ -5,7 +5,6 @@ import type {
 } from "@pi-in-the-sky/client/protocol";
 import { useState } from "react";
 import {
-  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -15,6 +14,7 @@ import {
 } from "react-native";
 
 import { THEME } from "../theme";
+import { TakeoverCard } from "./TakeoverCard";
 
 type StreamViewProps = {
   readonly messages: readonly ChatMessage[];
@@ -183,31 +183,11 @@ export function StreamView({
             )}
 
             {activeTakeovers.map((takeover) => (
-              <View key={takeover.id} style={styles.takeoverCard}>
-                <Text style={styles.takeoverTitle}>Action needed</Text>
-                <Text style={styles.assistantBody}>{takeover.reason}</Text>
-                <Text style={styles.subtle}>{takeover.url}</Text>
-                <View style={styles.row}>
-                  {takeover.liveViewUrl ? (
-                    <Pressable
-                      style={styles.secondaryButton}
-                      onPress={() => {
-                        if (takeover.liveViewUrl) {
-                          void Linking.openURL(takeover.liveViewUrl);
-                        }
-                      }}
-                    >
-                      <Text style={styles.secondaryButtonText}>Open</Text>
-                    </Pressable>
-                  ) : null}
-                  <Pressable
-                    style={styles.primaryButton}
-                    onPress={() => onResumeTakeover(takeover.id)}
-                  >
-                    <Text style={styles.primaryButtonText}>Done</Text>
-                  </Pressable>
-                </View>
-              </View>
+              <TakeoverCard
+                key={takeover.id}
+                takeover={takeover}
+                onResume={onResumeTakeover}
+              />
             ))}
           </View>
         </ScrollView>
@@ -362,34 +342,6 @@ const styles = StyleSheet.create({
   userBody: { color: THEME.white },
   assistantBody: { color: THEME.textPrimary },
   subtle: { color: THEME.textSecondary, fontSize: 12 },
-  takeoverCard: {
-    padding: 16,
-    borderRadius: 12,
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.orange,
-    gap: 8,
-  },
-  takeoverTitle: { color: THEME.textPrimary, fontSize: 14, fontWeight: "600" },
-  row: { flexDirection: "row", gap: 8, marginTop: 4 },
-  primaryButton: {
-    backgroundColor: THEME.blue,
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderRadius: 8,
-  },
-  primaryButtonText: { color: THEME.white, fontSize: 12, fontWeight: "600" },
-  secondaryButton: {
-    backgroundColor: THEME.inputBg,
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderRadius: 8,
-  },
-  secondaryButtonText: {
-    color: THEME.textPrimary,
-    fontSize: 12,
-    fontWeight: "500",
-  },
   composerWrap: {
     paddingHorizontal: 24,
     paddingVertical: 14,

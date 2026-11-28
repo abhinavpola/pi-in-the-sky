@@ -33,12 +33,76 @@ export const TakeoverStatusSchema = z.enum(["waiting", "resumed"]);
 export const TakeoverRecordSchema = z.object({
   id: z.string(),
   url: z.string(),
+  hostname: z.string(),
+  origin: z.string(),
   liveViewUrl: z.string().nullable(),
+  expiresAt: z.number(),
   reason: z.string(),
   status: TakeoverStatusSchema,
 });
 
 export type TakeoverRecord = z.infer<typeof TakeoverRecordSchema>;
+
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+const HTTP_URL_PATTERN =
+  /^(https?):\/\/(\[[^\]]+\]|[^\s/:?#@]+)(?::(\d{1,5}))?(?:([/?#][^\s]*))?$/i;
+
+export type ParsedTakeoverTarget = {
+  readonly url: string;
+  readonly origin: string;
+  readonly hostname: string;
+  readonly isPunycode: boolean;
+};
+
+export function parseTakeoverTarget(
+  rawUrl: string,
+): ParsedTakeoverTarget | null {
+  const trimmed = rawUrl.trim();
+  const match = HTTP_URL_PATTERN.exec(trimmed);
+  if (!match?.[1] || !match[2]) {
+    return null;
+  }
+  const scheme = match[1].toLowerCase();
+  const rawHost = match[2].toLowerCase();
+  const port = match[3];
+  const suffix = match[4] ?? "";
+  if (port !== undefined) {
+    const portNum = Number(port);
+    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+      return null;
+    }
+  }
+  const hostname = rawHost.replace(/\.$/, "");
+  if (!hostname) {
+    return null;
+  }
+  const isDefaultPort =
+    (scheme === "https" && port === "443") ||
+    (scheme === "http" && port === "80");
+  const portSuffix = port && !isDefaultPort ? `:${port}` : "";
+  const origin = `${scheme}://${rawHost}${portSuffix}`;
+  const normalizedUrl = `${origin}${suffix.startsWith("/") ? suffix : suffix ? `/${suffix}` : "/"}`;
+  const isPunycode = hostname
+    .split(".")
+    .some((label) => label.startsWith("xn--"));
+  return {
+    url: normalizedUrl,
+    origin,
+    hostname,
+    isPunycode,
+  };
+}
+
+export function isSafeLiveViewUrl(rawUrl: string): boolean {
+  const parsed = parseTakeoverTarget(rawUrl);
+  if (!parsed) {
+    return false;
+  }
+  if (parsed.origin.startsWith("https://")) {
+    return true;
+  }
+  return LOOPBACK_HOSTS.has(parsed.hostname);
+}
 
 export const ProfileEntrySchema = z.object({
   key: z.string(),

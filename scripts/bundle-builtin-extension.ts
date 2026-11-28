@@ -1,5 +1,7 @@
 import path from "node:path";
 
+import { z } from "zod";
+
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const extensionRoot = path.join(repoRoot, "services", "cfw-agent", "extension");
 const outputFile = path.join(
@@ -11,27 +13,20 @@ const outputFile = path.join(
   "builtin-extension.json",
 );
 
-function extractFrontmatter(content: string): {
-  readonly name?: string;
-  readonly description?: string;
-} {
+const FrontmatterSchema = z.object({
+  name: z.string().trim().min(1).optional(),
+  description: z.string().trim().min(1).optional(),
+});
+
+function extractFrontmatter(
+  content: string,
+): z.infer<typeof FrontmatterSchema> {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!match?.[1]) {
     return {};
   }
-  const parsed: unknown = Bun.YAML.parse(match[1]);
-  if (typeof parsed !== "object" || parsed === null) {
-    return {};
-  }
-  const name =
-    "name" in parsed && typeof parsed.name === "string"
-      ? parsed.name.trim()
-      : undefined;
-  const description =
-    "description" in parsed && typeof parsed.description === "string"
-      ? parsed.description.trim()
-      : undefined;
-  return { name, description };
+  const parsed = FrontmatterSchema.safeParse(Bun.YAML.parse(match[1]));
+  return parsed.success ? parsed.data : {};
 }
 
 export async function bundleBuiltinExtension(): Promise<void> {

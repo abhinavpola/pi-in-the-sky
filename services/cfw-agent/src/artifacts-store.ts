@@ -1,11 +1,11 @@
+import fs from "node:fs";
+import path from "node:path";
+
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
 
-import { MemoryFS } from "./memory-fs";
-
 const EXTENSION_ROOT = "extension";
 const DEFAULT_BRANCH = "main";
-const WORKSPACE_DIR = "/workspace";
 const GIT_AUTHOR = {
   name: "Pi in the Sky Agent",
   email: "agent@pi-in-the-sky.local",
@@ -93,7 +93,10 @@ export async function mutateRepo(
   artifacts: Artifacts,
   repoName: string,
   commitMessage: string,
-  mutate: (fs: MemoryFS, dir: string) => Promise<readonly string[]>,
+  mutate: (
+    fsPromises: typeof fs.promises,
+    dir: string,
+  ) => Promise<readonly string[]>,
 ): Promise<{ readonly commit: string }> {
   using repo = await openOrCreateRepo(artifacts, repoName);
   const info = await repo.info();
@@ -101,13 +104,14 @@ export async function mutateRepo(
   const token = await repo.createToken("write", 300);
   const password = stripTokenExpiry(token.plaintext);
   const onAuth = () => ({ username: "x", password });
-  const fs = new MemoryFS();
+  const workspaceDir = path.posix.join("/tmp", `ext-${crypto.randomUUID()}`);
+  await fs.promises.mkdir(workspaceDir, { recursive: true });
   try {
     if (existingLog.length > 0) {
       await git.clone({
         fs,
         http,
-        dir: WORKSPACE_DIR,
+        dir: workspaceDir,
         url: info.remote,
         ref: DEFAULT_BRANCH,
         singleBranch: true,
@@ -117,36 +121,39 @@ export async function mutateRepo(
     } else {
       await git.init({
         fs,
-        dir: WORKSPACE_DIR,
+        dir: workspaceDir,
         defaultBranch: DEFAULT_BRANCH,
       });
     }
-    const changedPaths = await mutate(fs, WORKSPACE_DIR);
+    const changedPaths = await mutate(fs.promises, workspaceDir);
     for (const filepath of changedPaths) {
-      const fullPath = `${WORKSPACE_DIR}/${filepath}`;
+      const fullPath = path.posix.join(workspaceDir, filepath);
       try {
         await fs.promises.stat(fullPath);
-        await git.add({ fs, dir: WORKSPACE_DIR, filepath });
+        await git.add({ fs, dir: workspaceDir, filepath });
       } catch {
-        await git.remove({ fs, dir: WORKSPACE_DIR, filepath });
+        await git.remove({ fs, dir: workspaceDir, filepath });
       }
     }
     const commit = await git.commit({
       fs,
-      dir: WORKSPACE_DIR,
+      dir: workspaceDir,
       message: commitMessage,
       author: GIT_AUTHOR,
     });
     await git.push({
       fs,
       http,
-      dir: WORKSPACE_DIR,
+      dir: workspaceDir,
       url: info.remote,
       ref: DEFAULT_BRANCH,
       onAuth,
     });
     return { commit };
   } finally {
+    await fs.promises
+      .rm(workspaceDir, { recursive: true, force: true })
+      .catch(() => undefined);
     await repo.revokeToken(token.plaintext).catch(() => false);
   }
 }

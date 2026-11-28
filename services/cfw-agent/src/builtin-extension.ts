@@ -1,7 +1,7 @@
 import builtinExtensionJson from "./generated/builtin-extension.json";
 
 const BUILTIN_FILES = new Map<string, string>(
-  Object.entries(builtinExtensionJson),
+  Object.entries(builtinExtensionJson.files),
 );
 
 type SkillSummary = {
@@ -9,21 +9,6 @@ type SkillSummary = {
   readonly path: string;
   readonly description: string;
 };
-
-function parseFrontmatterField(content: string, field: string): string | null {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!match?.[1]) {
-    return null;
-  }
-  const line = match[1]
-    .split(/\r?\n/)
-    .find((entry) => entry.startsWith(`${field}:`));
-  if (!line) {
-    return null;
-  }
-  const value = line.slice(field.length + 1).trim();
-  return value.replace(/^["']|["']$/g, "");
-}
 
 export function getBuiltinExtensionFiles(): ReadonlyMap<string, string> {
   return BUILTIN_FILES;
@@ -68,17 +53,5 @@ export function mergeExtensionFileListing(
 }
 
 export function listBuiltinSkills(): readonly SkillSummary[] {
-  const skills: SkillSummary[] = [];
-  for (const [relativePath, content] of BUILTIN_FILES) {
-    const match = relativePath.match(/^skills\/([^/]+)\/SKILL\.md$/);
-    if (!match?.[1]) {
-      continue;
-    }
-    const name = parseFrontmatterField(content, "name") ?? match[1];
-    const description =
-      parseFrontmatterField(content, "description") ??
-      `Built-in skill (${relativePath}).`;
-    skills.push({ name, path: relativePath, description });
-  }
-  return skills.sort((a, b) => a.name.localeCompare(b.name));
+  return builtinExtensionJson.skills;
 }

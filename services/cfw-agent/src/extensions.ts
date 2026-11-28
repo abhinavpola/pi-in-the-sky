@@ -1,3 +1,5 @@
+import { posix } from "node:path";
+
 import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { obj, opt, str, unknown } from "@earendil-works/pi-schema";
 import { transform } from "sucrase";
@@ -242,8 +244,12 @@ export function createExtensionsExtension(
           target.artifacts,
           repoName,
           commitMessage?.trim() || `Update ${target.repoPath}`,
-          async (fs, dir) => {
-            await fs.writeFile(`${dir}/${target.repoPath}`, content);
+          async (fsPromises, dir) => {
+            const fullPath = posix.join(dir, target.repoPath);
+            await fsPromises.mkdir(posix.dirname(fullPath), {
+              recursive: true,
+            });
+            await fsPromises.writeFile(fullPath, content, "utf8");
             return [target.repoPath];
           },
         ),

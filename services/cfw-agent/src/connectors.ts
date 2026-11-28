@@ -1,18 +1,12 @@
-import { Buffer } from "node:buffer";
-
-import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
+import type {
+  Extension,
+  ToolExecutionResult,
+  ToolRegistration,
+} from "@earendil-works/pi-durable";
 import { num, obj, opt, str } from "@earendil-works/pi-schema";
-import type { ConnectorProvider } from "@pi-in-the-sky/client/protocol";
 
-import {
-  fetchJsonWithBearer,
-  type HttpFetcher,
-  toToolResult,
-} from "./http-tool";
-import type { SecretsFacetStore } from "./secrets-facet";
-
-const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
-const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3";
+import type { ExtensionModuleRunner } from "./extensions";
+import { errorToolResult, jsonToolResult } from "./http-tool";
 
 const GmailSearchSchema = obj({
   query: str(),
@@ -36,48 +30,40 @@ const CalendarListEventsSchema = obj({
   pageToken: opt(str()),
 });
 
-function encodeBase64Url(input: string): string {
-  return Buffer.from(input, "utf8").toString("base64url");
+async function runConnectorModule(
+  runModule: ExtensionModuleRunner,
+  path: string,
+  input: unknown,
+): Promise<ToolExecutionResult> {
+  const result = await runModule({ path, input });
+  if (result.ok) {
+    return jsonToolResult(result.output);
+  }
+  const message =
+    typeof result.output === "object" &&
+    result.output !== null &&
+    "error" in result.output &&
+    typeof result.output.error === "string"
+      ? result.output.error
+      : JSON.stringify(result.output);
+  return errorToolResult(message);
 }
 
 export function createConnectorsExtension(
-  secrets: SecretsFacetStore,
-  fetcher: HttpFetcher = (input, init) => fetch(input, init),
+  runModule: ExtensionModuleRunner,
 ): Extension {
-  const resolveToken = (
-    provider: ConnectorProvider,
-  ): Promise<string | undefined> => secrets.getConnectorAccessToken(provider);
-
-  const gmailBase = () => GMAIL_API_BASE;
-  const calendarBase = () => CALENDAR_API_BASE;
-
   const gmailSearchTool: ToolRegistration<typeof GmailSearchSchema> = {
     name: "gmail_search",
     description:
       "Search the user's Gmail messages using Gmail search syntax (e.g. 'Tokyo flight confirmation').",
     parameters: GmailSearchSchema,
     replay: "safe",
-    async execute({ query, maxResults }) {
-      const token = await resolveToken("gmail");
-      if (!token) {
-        return {
-          isError: true,
-          output: [
-            { type: "text", text: "Gmail connector is not authorized." },
-          ],
-        };
-      }
-      const params = new URLSearchParams({
-        q: query,
-        maxResults: String(Math.max(1, Math.min(maxResults ?? 10, 25))),
-      });
-      const result = await fetchJsonWithBearer(
-        `${gmailBase()}/users/me/messages?${params.toString()}`,
-        fetcher,
-        { token },
-      );
-      return toToolResult(result);
-    },
+    execute: ({ query, maxResults }) =>
+      runConnectorModule(runModule, "tools/gmail.ts", {
+        action: "search",
+        query,
+        maxResults,
+      }),
   };
 
   const gmailGetMessageTool: ToolRegistration<typeof GmailGetMessageSchema> = {
@@ -85,23 +71,11 @@ export function createConnectorsExtension(
     description: "Fetch a full Gmail message by messageId.",
     parameters: GmailGetMessageSchema,
     replay: "safe",
-    async execute({ messageId }) {
-      const token = await resolveToken("gmail");
-      if (!token) {
-        return {
-          isError: true,
-          output: [
-            { type: "text", text: "Gmail connector is not authorized." },
-          ],
-        };
-      }
-      const result = await fetchJsonWithBearer(
-        `${gmailBase()}/users/me/messages/${encodeURIComponent(messageId)}`,
-        fetcher,
-        { token },
-      );
-      return toToolResult(result);
-    },
+    execute: ({ messageId }) =>
+      runConnectorModule(runModule, "tools/gmail.ts", {
+        action: "get_message",
+        messageId,
+      }),
   };
 
   const gmailCreateDraftTool: ToolRegistration<typeof GmailCreateDraftSchema> =
@@ -111,38 +85,13 @@ export function createConnectorsExtension(
         "Create a Gmail draft (does not send; ask the user before sending).",
       parameters: GmailCreateDraftSchema,
       replay: "unsafe",
-      async execute({ to, subject, body }) {
-        const token = await resolveToken("gmail");
-        if (!token) {
-          return {
-            isError: true,
-            output: [
-              { type: "text", text: "Gmail connector is not authorized." },
-            ],
-          };
-        }
-        const rawMime = [
-          `To: ${to}`,
-          `Subject: ${subject}`,
-          "Content-Type: text/plain; charset=UTF-8",
-          "",
+      execute: ({ to, subject, body }) =>
+        runConnectorModule(runModule, "tools/gmail.ts", {
+          action: "create_draft",
+          to,
+          subject,
           body,
-        ].join("\r\n");
-        const result = await fetchJsonWithBearer(
-          `${gmailBase()}/users/me/drafts`,
-          fetcher,
-          {
-            token,
-            init: {
-              method: "POST",
-              body: JSON.stringify({
-                message: { raw: encodeBase64Url(rawMime) },
-              }),
-            },
-          },
-        );
-        return toToolResult(result);
-      },
+        }),
     };
 
   const calendarListEventsTool: ToolRegistration<
@@ -153,36 +102,14 @@ export function createConnectorsExtension(
       "List Google Calendar events in an ISO-8601 time range [timeMin, timeMax].",
     parameters: CalendarListEventsSchema,
     replay: "safe",
-    async execute({ timeMin, timeMax, maxResults, pageToken }) {
-      const token = await resolveToken("google_calendar");
-      if (!token) {
-        return {
-          isError: true,
-          output: [
-            {
-              type: "text",
-              text: "Google Calendar connector is not authorized.",
-            },
-          ],
-        };
-      }
-      const params = new URLSearchParams({
+    execute: ({ timeMin, timeMax, maxResults, pageToken }) =>
+      runConnectorModule(runModule, "tools/google-calendar.ts", {
+        action: "list_events",
         timeMin,
         timeMax,
-        singleEvents: "true",
-        orderBy: "startTime",
-        maxResults: String(Math.max(1, Math.min(maxResults ?? 25, 100))),
-      });
-      if (pageToken) {
-        params.set("pageToken", pageToken);
-      }
-      const result = await fetchJsonWithBearer(
-        `${calendarBase()}/calendars/primary/events?${params.toString()}`,
-        fetcher,
-        { token },
-      );
-      return toToolResult(result);
-    },
+        maxResults,
+        pageToken,
+      }),
   };
 
   return {

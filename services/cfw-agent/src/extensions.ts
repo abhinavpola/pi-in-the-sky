@@ -2,7 +2,6 @@ import { posix } from "node:path";
 
 import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { obj, opt, str, unknown } from "@earendil-works/pi-schema";
-import { transform } from "sucrase";
 
 import {
   listExtensionFiles,
@@ -17,128 +16,18 @@ import {
   listBuiltinSkills,
   mergeExtensionFileListing,
 } from "./builtin-extension";
+import type { ConnectorBridge } from "./connector-bridge";
+import {
+  buildWorkerModules,
+  compileTsModule,
+  type DynamicRunResult,
+  runInDynamicWorker,
+} from "./dynamic-runner";
 import { jsonToolResult } from "./http-tool";
 
 const ARTIFACTS_REPO_PREFIX = "agent-extension";
 const FACET_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const DEFAULT_ENTRY_PATH = "extension.ts";
-const DYNAMIC_COMPAT_DATE = "2026-11-27";
-
-function compileTsModule(source: string): string {
-  return transform(source, { transforms: ["typescript"] }).code;
-}
-
-function buildWorkerModules(
-  rawModules: ReadonlyMap<string, string>,
-  mainModule: string,
-): Record<string, WorkerLoaderModule> {
-  const modules: Record<string, WorkerLoaderModule> = {};
-  for (const [relativePath, content] of rawModules) {
-    try {
-      if (relativePath.endsWith(".json")) {
-        modules[relativePath] = { json: JSON.parse(content) };
-        continue;
-      }
-      const js = relativePath.endsWith(".ts")
-        ? compileTsModule(content)
-        : content;
-      modules[relativePath] = { js };
-      if (relativePath.endsWith(".ts")) {
-        const withoutExt = relativePath.slice(0, -3);
-        modules[`${withoutExt}.js`] = { js };
-        modules[withoutExt] = { js };
-      }
-    } catch (thrown) {
-      if (relativePath === mainModule) {
-        throw thrown;
-      }
-    }
-  }
-  return modules;
-}
-
-async function parseWorkerResponse(response: Response): Promise<{
-  readonly ok: boolean;
-  readonly status: number;
-  readonly output: unknown;
-}> {
-  const contentType = response.headers.get("Content-Type") ?? "";
-  const rawText = await response.text();
-  let output: unknown = rawText;
-  if (contentType.includes("application/json")) {
-    try {
-      output = JSON.parse(rawText);
-    } catch {
-      output = rawText;
-    }
-  }
-  return {
-    ok: response.ok,
-    status: response.status,
-    output,
-  };
-}
-
-function runWorkerRequest(input: unknown): Request {
-  return new Request("https://extension.internal/run", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ input: input ?? null }),
-  });
-}
-
-async function runInDynamicWorker(
-  loader: WorkerLoader,
-  mainModule: string,
-  modules: Record<string, WorkerLoaderModule>,
-  input: unknown,
-  facetOptions?: {
-    readonly facets: DurableObjectFacets;
-    readonly facetName: string;
-    readonly className?: string;
-    readonly handlerKey: string;
-    readonly activeFacets: Map<string, string>;
-  },
-): Promise<{
-  readonly ok: boolean;
-  readonly status: number;
-  readonly output: unknown;
-}> {
-  const loadWorker = () =>
-    loader.load({
-      compatibilityDate: DYNAMIC_COMPAT_DATE,
-      mainModule,
-      modules,
-      globalOutbound: null,
-      limits: {
-        cpuMs: 50,
-        subRequests: 0,
-      },
-    });
-  if (facetOptions) {
-    const previousKey = facetOptions.activeFacets.get(facetOptions.facetName);
-    if (previousKey !== undefined && previousKey !== facetOptions.handlerKey) {
-      try {
-        facetOptions.facets.abort(facetOptions.facetName, "handler-changed");
-      } catch {
-        void 0;
-      }
-    }
-    facetOptions.activeFacets.set(
-      facetOptions.facetName,
-      facetOptions.handlerKey,
-    );
-    const facet = facetOptions.facets.get(facetOptions.facetName, () => ({
-      class: loadWorker().getDurableObjectClass(facetOptions.className),
-    }));
-    const response = await facet.fetch(runWorkerRequest(input));
-    return parseWorkerResponse(response);
-  }
-  const response = await loadWorker()
-    .getEntrypoint()
-    .fetch(runWorkerRequest(input));
-  return parseWorkerResponse(response);
-}
 
 const EmptySchema = obj({});
 
@@ -168,12 +57,30 @@ const DeleteFileSchema = obj({
 const INVALID_PATH_ERROR =
   "Invalid path. Files must live under extension/ as extension.ts, instructions.md, or inside tools/, channels/, connections/, skills/, schedules/, subagents/, hooks/, or lib/.";
 
-export function createExtensionsExtension(
-  getArtifacts: () => Artifacts | undefined,
-  getLoader: () => WorkerLoader | undefined,
-  getFacets: () => DurableObjectFacets | undefined,
-  agentScope: string,
-): Extension {
+type ExtensionModuleRunRequest = {
+  readonly path?: string;
+  readonly code?: string;
+  readonly input?: unknown;
+  readonly facet?: string;
+  readonly className?: string;
+};
+
+export type ExtensionModuleRunner = (
+  request: ExtensionModuleRunRequest,
+) => Promise<DynamicRunResult>;
+
+export function createExtensionsRuntime(options: {
+  readonly getArtifacts: () => Artifacts | undefined;
+  readonly getLoader: () => WorkerLoader | undefined;
+  readonly getFacets: () => DurableObjectFacets | undefined;
+  readonly getConnectorBridge?: () => ConnectorBridge | undefined;
+  readonly agentScope: string;
+}): {
+  readonly extension: Extension;
+  readonly runModule: ExtensionModuleRunner;
+} {
+  const { getArtifacts, getLoader, getFacets, getConnectorBridge, agentScope } =
+    options;
   const cleanScope = agentScope
     .toLowerCase()
     .replace(/[^a-z0-9_-]/g, "")
@@ -201,14 +108,13 @@ export function createExtensionsExtension(
       try {
         facets.abort(facetName, "extension-updated");
       } catch {
-        continue;
+        void 0;
       }
     }
-    activeFacets.clear();
   };
 
   const resolveTarget = (
-    path: string,
+    rawPath: string,
   ):
     | {
         readonly ok: true;
@@ -219,19 +125,121 @@ export function createExtensionsExtension(
     | { readonly ok: false; readonly error: string } => {
     const artifacts = getArtifacts();
     if (!artifacts) {
-      return { ok: false, error: "ARTIFACTS binding is not configured." };
+      return {
+        ok: false,
+        error: "ARTIFACTS binding is not configured on this Worker.",
+      };
     }
-    const normalized = normalizeExtensionPath(path);
+    const normalized = normalizeExtensionPath(rawPath);
     if (!normalized) {
       return { ok: false, error: INVALID_PATH_ERROR };
     }
     return { ok: true, artifacts, ...normalized };
   };
 
+  const runModule: ExtensionModuleRunner = async ({
+    path,
+    code,
+    input,
+    facet,
+    className,
+  }) => {
+    const loader = getLoader();
+    if (!loader) {
+      return {
+        ok: false,
+        status: 500,
+        output: {
+          error: "LOADER (Dynamic Worker Loader) binding is not configured.",
+        },
+      };
+    }
+    let facetTarget:
+      | {
+          readonly facets: DurableObjectFacets;
+          readonly facetName: string;
+          readonly className?: string;
+          readonly activeFacets: Map<string, string>;
+        }
+      | undefined;
+    if (facet !== undefined) {
+      if (!FACET_NAME_PATTERN.test(facet)) {
+        return {
+          ok: false,
+          status: 400,
+          output: {
+            error:
+              "Invalid facet name. Use 1-64 lowercase letters, digits, hyphens, or underscores.",
+          },
+        };
+      }
+      const facets = getFacets();
+      if (!facets) {
+        return {
+          ok: false,
+          status: 500,
+          output: { error: "Durable Object facets are not available." },
+        };
+      }
+      facetTarget = { facets, facetName: facet, className, activeFacets };
+    }
+    const connectorBridge = getConnectorBridge?.();
+    if (code) {
+      return runInDynamicWorker(
+        loader,
+        DEFAULT_ENTRY_PATH,
+        { [DEFAULT_ENTRY_PATH]: { js: compileTsModule(code) } },
+        input,
+        {
+          connectorBridge,
+          ...(facetTarget
+            ? {
+                facet: {
+                  ...facetTarget,
+                  handlerKey: `inline:${className ?? ""}:${code}`,
+                },
+              }
+            : {}),
+        },
+      );
+    }
+    const normalized = normalizeExtensionPath(path ?? DEFAULT_ENTRY_PATH);
+    if (!normalized) {
+      return { ok: false, status: 400, output: { error: INVALID_PATH_ERROR } };
+    }
+    const rawModules = new Map<string, string>(getBuiltinExtensionFiles());
+    const artifacts = getArtifacts();
+    if (artifacts) {
+      const repoModules = await readExtensionModules(artifacts, repoName);
+      for (const [modPath, modSource] of repoModules) {
+        rawModules.set(modPath, modSource);
+      }
+    }
+    if (!rawModules.has(normalized.relativePath)) {
+      return {
+        ok: false,
+        status: 404,
+        output: { error: `Module "${normalized.repoPath}" not found.` },
+      };
+    }
+    const modules = buildWorkerModules(rawModules, normalized.relativePath);
+    return runInDynamicWorker(loader, normalized.relativePath, modules, input, {
+      connectorBridge,
+      ...(facetTarget
+        ? {
+            facet: {
+              ...facetTarget,
+              handlerKey: `repo:${normalized.relativePath}:${className ?? ""}`,
+            },
+          }
+        : {}),
+    });
+  };
+
   const writeTool: ToolRegistration<typeof WriteFileSchema> = {
     name: "write_file",
     description:
-      "Write or update a file inside your extension/ workspace in Cloudflare Artifacts (extension.ts, instructions.md, or files under tools/, channels/, connections/, skills/, schedules/, subagents/, hooks/, lib/). Writing a built-in path overrides the bundled default.",
+      "Create or update a file inside your extension/ workspace (e.g. extension.ts, instructions.md, tools/inbox.ts, skills/triage/SKILL.md, schedules/daily.ts, lib/helpers.ts) and commit it to Cloudflare Artifacts. Writing a built-in path overrides it.",
     parameters: WriteFileSchema,
     replay: "safe",
     async execute({ path, content, commitMessage }) {
@@ -289,7 +297,7 @@ export function createExtensionsExtension(
   const readTool: ToolRegistration<typeof ReadFileSchema> = {
     name: "read_file",
     description:
-      "Read a file from your extension/ workspace (checks your Cloudflare Artifacts overrides first, then bundled built-in files like instructions.md or skills/<name>/SKILL.md).",
+      "Read a file from your extension/ workspace (checks Cloudflare Artifacts overrides first, then bundled built-ins).",
     parameters: ReadFileSchema,
     replay: "safe",
     async execute({ path }) {
@@ -297,7 +305,6 @@ export function createExtensionsExtension(
       if (!normalized) {
         return jsonToolResult({ error: INVALID_PATH_ERROR }, true);
       }
-      const builtin = getBuiltinExtensionFile(normalized.relativePath);
       const artifacts = getArtifacts();
       const repoContent = artifacts
         ? await readExtensionFile(artifacts, repoName, normalized.repoPath)
@@ -306,16 +313,20 @@ export function createExtensionsExtension(
         return jsonToolResult({
           path: normalized.relativePath,
           repoPath: normalized.repoPath,
-          source: builtin !== null ? "override" : "user",
+          source:
+            getBuiltinExtensionFile(normalized.relativePath) !== null
+              ? "override"
+              : "user",
           content: repoContent,
         });
       }
-      if (builtin !== null) {
+      const builtinContent = getBuiltinExtensionFile(normalized.relativePath);
+      if (builtinContent !== null) {
         return jsonToolResult({
           path: normalized.relativePath,
           repoPath: normalized.repoPath,
           source: "builtin",
-          content: builtin,
+          content: builtinContent,
         });
       }
       return jsonToolResult(
@@ -328,97 +339,11 @@ export function createExtensionsExtension(
   const runTool: ToolRegistration<typeof RunExtensionSchema> = {
     name: "run_module",
     description:
-      "Execute a TypeScript/JavaScript module from extension/ (default: extension.ts) or inline code inside an isolated Dynamic Worker with no outbound network access. Pass facet (and optional className) to run a DurableObject class as a child facet with its own persistent SQLite storage.",
+      "Execute a TypeScript/JavaScript module from extension/ (default: extension.ts) or inline code inside an isolated Dynamic Worker with no outbound network access (approved connectors are bridged via env.CONNECTOR_BRIDGE). Pass facet (and optional className) to run a DurableObject class as a child facet with its own persistent SQLite storage.",
     parameters: RunExtensionSchema,
     replay: "unsafe",
-    async execute({ path, code, input, facet, className }) {
-      const loader = getLoader();
-      if (!loader) {
-        return jsonToolResult(
-          {
-            error: "LOADER (Dynamic Worker Loader) binding is not configured.",
-          },
-          true,
-        );
-      }
-      let facetTarget:
-        | {
-            readonly facets: DurableObjectFacets;
-            readonly facetName: string;
-            readonly className?: string;
-            readonly activeFacets: Map<string, string>;
-          }
-        | undefined;
-      if (facet !== undefined) {
-        if (!FACET_NAME_PATTERN.test(facet)) {
-          return jsonToolResult(
-            {
-              error:
-                "Invalid facet name. Use 1-64 lowercase letters, digits, hyphens, or underscores.",
-            },
-            true,
-          );
-        }
-        const facets = getFacets();
-        if (!facets) {
-          return jsonToolResult(
-            { error: "Durable Object facets are not available." },
-            true,
-          );
-        }
-        facetTarget = {
-          facets,
-          facetName: facet,
-          className,
-          activeFacets,
-        };
-      }
-      if (code) {
-        const result = await runInDynamicWorker(
-          loader,
-          DEFAULT_ENTRY_PATH,
-          { [DEFAULT_ENTRY_PATH]: { js: compileTsModule(code) } },
-          input,
-          facetTarget
-            ? {
-                ...facetTarget,
-                handlerKey: `inline:${className ?? ""}:${code}`,
-              }
-            : undefined,
-        );
-        return jsonToolResult(result, !result.ok);
-      }
-      const normalized = normalizeExtensionPath(path ?? DEFAULT_ENTRY_PATH);
-      if (!normalized) {
-        return jsonToolResult({ error: INVALID_PATH_ERROR }, true);
-      }
-      const rawModules = new Map<string, string>(getBuiltinExtensionFiles());
-      const artifacts = getArtifacts();
-      if (artifacts) {
-        const repoModules = await readExtensionModules(artifacts, repoName);
-        for (const [modPath, modSource] of repoModules) {
-          rawModules.set(modPath, modSource);
-        }
-      }
-      if (!rawModules.has(normalized.relativePath)) {
-        return jsonToolResult(
-          { error: `Module "${normalized.repoPath}" not found.` },
-          true,
-        );
-      }
-      const modules = buildWorkerModules(rawModules, normalized.relativePath);
-      const result = await runInDynamicWorker(
-        loader,
-        normalized.relativePath,
-        modules,
-        input,
-        facetTarget
-          ? {
-              ...facetTarget,
-              handlerKey: `repo:${normalized.relativePath}:${className ?? ""}`,
-            }
-          : undefined,
-      );
+    async execute(args) {
+      const result = await runModule(args);
       return jsonToolResult(result, !result.ok);
     },
   };
@@ -426,7 +351,7 @@ export function createExtensionsExtension(
   const deleteTool: ToolRegistration<typeof DeleteFileSchema> = {
     name: "delete_file",
     description:
-      "Delete an existing user-authored file or override from your extension/ workspace in Cloudflare Artifacts with a Git commit (deleting an override restores the bundled built-in file).",
+      "Delete a file from your Cloudflare Artifacts extension/ workspace (deleting an override restores the bundled built-in file).",
     parameters: DeleteFileSchema,
     replay: "safe",
     async execute({ path, commitMessage }) {
@@ -447,8 +372,10 @@ export function createExtensionsExtension(
           target.artifacts,
           repoName,
           commitMessage?.trim() || `Delete ${target.repoPath}`,
-          async (fs, dir) => {
-            await fs.unlink(`${dir}/${target.repoPath}`).catch(() => undefined);
+          async (fsPromises, dir) => {
+            await fsPromises
+              .unlink(posix.join(dir, target.repoPath))
+              .catch(() => undefined);
             return [target.repoPath];
           },
         );
@@ -470,28 +397,30 @@ export function createExtensionsExtension(
     },
   };
 
-  const skills = listBuiltinSkills();
+  const skillCatalogLines = listBuiltinSkills().map(
+    (skill) => `- ${skill.name} (${skill.path}): ${skill.description}`,
+  );
 
   return {
-    name: "extensions",
-    sections: [
-      {
-        key: "self_extensions",
-        render: () =>
-          "You own a Git-versioned extension/ workspace (bundled built-ins overlaid with your Cloudflare Artifacts repo) with layout: extension.ts, tools/, channels/, connections/, skills/, schedules/, subagents/, hooks/, instructions.md, and lib/. Use list_files, read_file, write_file, delete_file, and run_module (Dynamic Worker sandbox, with optional Durable Object facets for persistent per-feature SQLite state).",
-      },
-      {
-        key: "available_skills",
-        render: () =>
-          [
-            "Built-in skills (call read_file on the skill path when relevant; use list_files to see any custom skills):",
-            ...skills.map(
-              (skill) =>
-                `- ${skill.name} (${skill.path}): ${skill.description}`,
-            ),
-          ].join("\n"),
-      },
-    ],
-    tools: [writeTool, listTool, readTool, runTool, deleteTool],
+    runModule,
+    extension: {
+      name: "extensions",
+      tools: [writeTool, listTool, readTool, runTool, deleteTool],
+      sections: [
+        {
+          key: "extension-workspace",
+          render: () =>
+            "You own a Git-versioned extension/ workspace (bundled built-ins overlaid with your Cloudflare Artifacts repo) with layout: extension.ts, tools/, channels/, connections/, skills/, schedules/, subagents/, hooks/, instructions.md, and lib/. Use list_files, read_file, write_file, delete_file, and run_module (Dynamic Worker sandbox, with optional Durable Object facets for persistent per-feature SQLite state).",
+        },
+        {
+          key: "skills-catalog",
+          render: () =>
+            [
+              "Built-in skills (inspect or load with read_file):",
+              ...skillCatalogLines,
+            ].join("\n"),
+        },
+      ],
+    },
   };
 }

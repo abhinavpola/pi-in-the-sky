@@ -22,21 +22,28 @@ function compileTsModule(source: string): string {
 
 function buildWorkerModules(
   rawModules: ReadonlyMap<string, string>,
+  mainModule: string,
 ): Record<string, WorkerLoaderModule> {
   const modules: Record<string, WorkerLoaderModule> = {};
   for (const [relativePath, content] of rawModules) {
-    if (relativePath.endsWith(".json")) {
-      modules[relativePath] = { json: JSON.parse(content) };
-      continue;
-    }
-    const js = relativePath.endsWith(".ts")
-      ? compileTsModule(content)
-      : content;
-    modules[relativePath] = { js };
-    if (relativePath.endsWith(".ts")) {
-      const withoutExt = relativePath.slice(0, -3);
-      modules[`${withoutExt}.js`] = { js };
-      modules[withoutExt] = { js };
+    try {
+      if (relativePath.endsWith(".json")) {
+        modules[relativePath] = { json: JSON.parse(content) };
+        continue;
+      }
+      const js = relativePath.endsWith(".ts")
+        ? compileTsModule(content)
+        : content;
+      modules[relativePath] = { js };
+      if (relativePath.endsWith(".ts")) {
+        const withoutExt = relativePath.slice(0, -3);
+        modules[`${withoutExt}.js`] = { js };
+        modules[withoutExt] = { js };
+      }
+    } catch (thrown) {
+      if (relativePath === mainModule) {
+        throw thrown;
+      }
     }
   }
   return modules;
@@ -367,7 +374,7 @@ export function createExtensionsExtension(
           true,
         );
       }
-      const modules = buildWorkerModules(rawModules);
+      const modules = buildWorkerModules(rawModules, target.relativePath);
       const result = await runInDynamicWorker(
         loader,
         target.relativePath,

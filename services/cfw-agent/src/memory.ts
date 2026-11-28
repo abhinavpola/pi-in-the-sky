@@ -61,6 +61,18 @@ export class MemoryStore {
         INSERT INTO memory_notes_fts(rowid, content, category, date)
         VALUES (new.id, new.content, new.category, new.date);
       END;
+
+      CREATE TRIGGER IF NOT EXISTS memory_notes_ad AFTER DELETE ON memory_notes BEGIN
+        INSERT INTO memory_notes_fts(memory_notes_fts, rowid, content, category, date)
+        VALUES ('delete', old.id, old.content, old.category, old.date);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS memory_notes_au AFTER UPDATE ON memory_notes BEGIN
+        INSERT INTO memory_notes_fts(memory_notes_fts, rowid, content, category, date)
+        VALUES ('delete', old.id, old.content, old.category, old.date);
+        INSERT INTO memory_notes_fts(rowid, content, category, date)
+        VALUES (new.id, new.content, new.category, new.date);
+      END;
     `);
   }
 

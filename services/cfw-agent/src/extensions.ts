@@ -81,7 +81,8 @@ async function runInDynamicWorker(
     readonly facets: DurableObjectFacets;
     readonly facetName: string;
     readonly className?: string;
-    readonly activeFacets: Set<string>;
+    readonly handlerKey: string;
+    readonly activeFacets: Map<string, string>;
   },
 ): Promise<{
   readonly ok: boolean;
@@ -100,7 +101,18 @@ async function runInDynamicWorker(
       },
     });
   if (facetOptions) {
-    facetOptions.activeFacets.add(facetOptions.facetName);
+    const previousKey = facetOptions.activeFacets.get(facetOptions.facetName);
+    if (previousKey !== undefined && previousKey !== facetOptions.handlerKey) {
+      try {
+        facetOptions.facets.abort(facetOptions.facetName, "handler-changed");
+      } catch {
+        void 0;
+      }
+    }
+    facetOptions.activeFacets.set(
+      facetOptions.facetName,
+      facetOptions.handlerKey,
+    );
     const facet = facetOptions.facets.get(facetOptions.facetName, () => ({
       class: loadWorker().getDurableObjectClass(facetOptions.className),
     }));
@@ -154,7 +166,7 @@ export function createExtensionsExtension(
   const repoName = cleanScope
     ? `${ARTIFACTS_REPO_PREFIX}-${cleanScope}`
     : ARTIFACTS_REPO_PREFIX;
-  const activeFacets = new Set<string>();
+  const activeFacets = new Map<string, string>();
   let mutationChain: Promise<unknown> = Promise.resolve();
   const enqueueMutation = <T>(run: () => Promise<T>): Promise<T> => {
     const next = mutationChain.then(run, run);
@@ -167,15 +179,17 @@ export function createExtensionsExtension(
   const reloadActiveFacets = (): void => {
     const facets = getFacets();
     if (!facets) {
+      activeFacets.clear();
       return;
     }
-    for (const facetName of activeFacets) {
+    for (const facetName of activeFacets.keys()) {
       try {
         facets.abort(facetName, "extension-updated");
       } catch {
         continue;
       }
     }
+    activeFacets.clear();
   };
 
   const resolveTarget = (
@@ -295,12 +309,12 @@ export function createExtensionsExtension(
           true,
         );
       }
-      let facetOptions:
+      let facetTarget:
         | {
             readonly facets: DurableObjectFacets;
             readonly facetName: string;
             readonly className?: string;
-            readonly activeFacets: Set<string>;
+            readonly activeFacets: Map<string, string>;
           }
         | undefined;
       if (facet !== undefined) {
@@ -320,7 +334,7 @@ export function createExtensionsExtension(
             true,
           );
         }
-        facetOptions = {
+        facetTarget = {
           facets,
           facetName: facet,
           className,
@@ -333,7 +347,12 @@ export function createExtensionsExtension(
           DEFAULT_ENTRY_PATH,
           { [DEFAULT_ENTRY_PATH]: { js: compileTsModule(code) } },
           input,
-          facetOptions,
+          facetTarget
+            ? {
+                ...facetTarget,
+                handlerKey: `inline:${className ?? ""}:${code}`,
+              }
+            : undefined,
         );
         return jsonToolResult(result, !result.ok);
       }
@@ -354,7 +373,12 @@ export function createExtensionsExtension(
         target.relativePath,
         modules,
         input,
-        facetOptions,
+        facetTarget
+          ? {
+              ...facetTarget,
+              handlerKey: `repo:${target.relativePath}:${className ?? ""}`,
+            }
+          : undefined,
       );
       return jsonToolResult(result, !result.ok);
     },

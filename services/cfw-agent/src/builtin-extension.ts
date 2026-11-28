@@ -21,7 +21,8 @@ function parseFrontmatterField(content: string, field: string): string | null {
   if (!line) {
     return null;
   }
-  return line.slice(field.length + 1).trim();
+  const value = line.slice(field.length + 1).trim();
+  return value.replace(/^["']|["']$/g, "");
 }
 
 export function getBuiltinExtensionFiles(): ReadonlyMap<string, string> {

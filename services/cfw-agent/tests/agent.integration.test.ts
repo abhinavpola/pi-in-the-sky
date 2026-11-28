@@ -1,5 +1,6 @@
 import { LOCAL_DEV_AUTH_TOKEN } from "@pi-in-the-sky/client/protocol";
 import { env, SELF } from "cloudflare:test";
+import { SignJWT } from "jose";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -47,33 +48,14 @@ function personalStub(): DurableObjectStub<TestPersonalAgent> {
   return env.PersonalAgent.getByName("personal");
 }
 
-function toBase64Url(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
-
 async function signAccessJwt(
   privateKey: CryptoKey,
   kid: string,
   payload: Record<string, unknown>,
 ): Promise<string> {
-  const encoder = new TextEncoder();
-  const headerSeg = toBase64Url(
-    encoder.encode(JSON.stringify({ alg: "RS256", typ: "JWT", kid })),
-  );
-  const payloadSeg = toBase64Url(encoder.encode(JSON.stringify(payload)));
-  const sigBuf = await crypto.subtle.sign(
-    "RSASSA-PKCS1-v1_5",
-    privateKey,
-    encoder.encode(`${headerSeg}.${payloadSeg}`),
-  );
-  return `${headerSeg}.${payloadSeg}.${toBase64Url(new Uint8Array(sigBuf))}`;
+  return new SignJWT(payload)
+    .setProtectedHeader({ alg: "RS256", typ: "JWT", kid })
+    .sign(privateKey);
 }
 
 function nextSocketMessage(
@@ -276,7 +258,7 @@ describe("cfw-agent workerd integration", () => {
           {
             id: "tc-skill",
             name: "read_file",
-            arguments: { path: "skills/flight-planning/SKILL.md" },
+            arguments: { path: "skills/email-inbox-triage/SKILL.md" },
           },
           {
             id: "tc-profile",
@@ -394,7 +376,7 @@ describe("cfw-agent workerd integration", () => {
       10_000,
     );
     const serializedView = JSON.stringify(finalView);
-    expect(serializedView).toContain("Flight & Trip Planning");
+    expect(serializedView).toContain("Email Inbox Triage");
     expect(serializedView).toContain("user_profile");
     expect(serializedView).not.toContain("connector_tokens");
     expect(serializedView).not.toContain(secretOauthToken);

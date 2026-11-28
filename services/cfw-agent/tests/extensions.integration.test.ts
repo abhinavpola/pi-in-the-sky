@@ -131,10 +131,10 @@ describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facet
             id: "tc-override-skill",
             name: "write_file",
             arguments: {
-              path: "skills/inbox-triage/SKILL.md",
+              path: "skills/email-inbox-triage/SKILL.md",
               content:
                 "# Custom Inbox Triage\nAlways prioritize VIP senders.\n",
-              commitMessage: "Override built-in inbox-triage skill",
+              commitMessage: "Override built-in email-inbox-triage skill",
             },
           },
           {
@@ -190,7 +190,7 @@ describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facet
           {
             id: "tc-read-override",
             name: "read_file",
-            arguments: { path: "skills/inbox-triage/SKILL.md" },
+            arguments: { path: "skills/email-inbox-triage/SKILL.md" },
           },
           {
             id: "tc-run-sum",
@@ -263,8 +263,8 @@ describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facet
             id: "tc-delete-override",
             name: "delete_file",
             arguments: {
-              path: "skills/inbox-triage/SKILL.md",
-              commitMessage: "Restore built-in inbox-triage skill",
+              path: "skills/email-inbox-triage/SKILL.md",
+              commitMessage: "Restore built-in email-inbox-triage skill",
             },
           },
         ],

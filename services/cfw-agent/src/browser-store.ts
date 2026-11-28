@@ -207,11 +207,16 @@ export class BrowserStore {
     const now = Date.now();
     return this.#sql
       .exec<BrowserTakeoverRow>(
-        "SELECT id, task_id, conversation_id, url, hostname, origin, live_view_url, expires_at, reason, status, created_at FROM browser_takeovers WHERE status = 'waiting' AND (expires_at = 0 OR expires_at > ?) ORDER BY created_at ASC",
-        now,
+        "SELECT id, task_id, conversation_id, url, hostname, origin, live_view_url, expires_at, reason, status, created_at FROM browser_takeovers WHERE status = 'waiting' ORDER BY created_at ASC",
       )
       .toArray()
-      .map((row) => this.#toTakeover(row));
+      .map((row) => {
+        const record = this.#toTakeover(row);
+        if (record.expiresAt > 0 && record.expiresAt <= now) {
+          return { ...record, liveViewUrl: null };
+        }
+        return record;
+      });
   }
 
   markResumed(id: string): void {

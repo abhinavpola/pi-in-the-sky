@@ -284,7 +284,7 @@ export function createExtensionsExtension(
     description:
       "Execute a TypeScript/JavaScript module from extension/ (default: extension.ts) or inline code inside an isolated Dynamic Worker with no outbound network access. Pass facet (and optional className) to run a DurableObject class as a child facet with its own persistent SQLite storage.",
     parameters: RunExtensionSchema,
-    replay: "safe",
+    replay: "unsafe",
     async execute({ path, code, input, facet, className }) {
       const loader = getLoader();
       if (!loader) {

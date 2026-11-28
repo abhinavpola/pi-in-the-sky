@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+
 import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { num, obj, opt, str } from "@earendil-works/pi-schema";
 import type { ConnectorProvider } from "@pi-in-the-sky/client/protocol";
@@ -11,14 +13,6 @@ import type { SecretsFacetStore } from "./secrets-facet";
 
 const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
 const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3";
-
-function toBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
-}
 
 const GmailSearchSchema = obj({
   query: str(),
@@ -43,10 +37,7 @@ const CalendarListEventsSchema = obj({
 });
 
 function encodeBase64Url(input: string): string {
-  return toBase64(new TextEncoder().encode(input))
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  return Buffer.from(input, "utf8").toString("base64url");
 }
 
 export function createConnectorsExtension(

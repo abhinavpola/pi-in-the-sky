@@ -1,16 +1,15 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const extensionRoot = path.join(repoRoot, "services", "cfw-agent", "extension");
-const outputDir = path.join(
+const outputFile = path.join(
   repoRoot,
   "services",
   "cfw-agent",
   "src",
   "generated",
+  "builtin-extension.json",
 );
-const outputFile = path.join(outputDir, "builtin-extension.json");
 
 export async function bundleBuiltinExtension(): Promise<void> {
   const relativePaths = (
@@ -20,10 +19,9 @@ export async function bundleBuiltinExtension(): Promise<void> {
   ).sort();
   const bundled: Record<string, string> = {};
   for (const rel of relativePaths) {
-    bundled[rel] = await readFile(path.join(extensionRoot, rel), "utf8");
+    bundled[rel] = await Bun.file(path.join(extensionRoot, rel)).text();
   }
-  await mkdir(outputDir, { recursive: true });
-  await writeFile(outputFile, `${JSON.stringify(bundled, null, 2)}\n`, "utf8");
+  await Bun.write(outputFile, `${JSON.stringify(bundled, null, 2)}\n`);
 }
 
 if (import.meta.main) {

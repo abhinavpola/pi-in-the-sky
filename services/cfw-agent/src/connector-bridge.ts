@@ -7,17 +7,40 @@ import { RpcTarget } from "cloudflare:workers";
 import { fetchJsonWithBearer, type HttpFetcher } from "./http-tool";
 import type { SecretsFacetStore } from "./secrets-facet";
 
+type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+
 const CONNECTOR_CONFIG: Record<
   ConnectorProvider,
-  { readonly baseUrl: string; readonly label: string }
+  {
+    readonly baseUrl: string;
+    readonly label: string;
+    readonly allowedOperations: readonly {
+      readonly method: HttpMethod;
+      readonly pathnamePattern: RegExp;
+    }[];
+  }
 > = {
   gmail: {
     baseUrl: "https://gmail.googleapis.com/gmail/v1",
     label: "Gmail",
+    allowedOperations: [
+      { method: "GET", pathnamePattern: /^\/gmail\/v1\/users\/me\/messages$/ },
+      {
+        method: "GET",
+        pathnamePattern: /^\/gmail\/v1\/users\/me\/messages\/[^/]+$/,
+      },
+      { method: "POST", pathnamePattern: /^\/gmail\/v1\/users\/me\/drafts$/ },
+    ],
   },
   google_calendar: {
     baseUrl: "https://www.googleapis.com/calendar/v3",
     label: "Google Calendar",
+    allowedOperations: [
+      {
+        method: "GET",
+        pathnamePattern: /^\/calendar\/v3\/calendars\/primary\/events$/,
+      },
+    ],
   },
 };
 
@@ -66,6 +89,17 @@ export class ConnectorBridge extends RpcTarget {
         error: "Connector apiPath escaped the allowed provider API prefix.",
       };
     }
+    const method: HttpMethod = init?.method ?? "GET";
+    const allowed = config.allowedOperations.some(
+      (op) =>
+        op.method === method && op.pathnamePattern.test(resolved.pathname),
+    );
+    if (!allowed) {
+      return {
+        ok: false,
+        error: `Operation ${method} ${resolved.pathname} is not permitted for ${config.label}.`,
+      };
+    }
     const token = await this.#secrets.getConnectorAccessToken(provider);
     if (!token) {
       return {
@@ -79,7 +113,7 @@ export class ConnectorBridge extends RpcTarget {
       {
         token,
         init: {
-          method: init?.method ?? "GET",
+          method,
           ...(init?.body !== undefined ? { body: init.body } : {}),
         },
       },

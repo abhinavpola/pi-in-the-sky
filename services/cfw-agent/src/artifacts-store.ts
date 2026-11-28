@@ -1,9 +1,9 @@
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
-import { z } from "zod";
 
 import { MemoryFS } from "./memory-fs";
 
+const EXTENSION_ROOT = "extension";
 const DEFAULT_BRANCH = "main";
 const WORKSPACE_DIR = "/workspace";
 const GIT_AUTHOR = {
@@ -11,13 +11,51 @@ const GIT_AUTHOR = {
   email: "agent@pi-in-the-sky.local",
 };
 
-const ExtensionManifestSchema = z.object({
-  name: z.string(),
-  description: z.string(),
-  updatedAt: z.string(),
-});
+const ALLOWED_ROOT_FILES = new Set(["extension.ts", "instructions.md"]);
+const ALLOWED_ROOT_DIRS = new Set([
+  "tools",
+  "channels",
+  "connections",
+  "skills",
+  "schedules",
+  "subagents",
+  "hooks",
+  "lib",
+]);
+const SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const EXECUTABLE_MODULE_EXT = /\.(?:ts|js|mjs|json)$/;
 
-export type ExtensionManifest = z.infer<typeof ExtensionManifestSchema>;
+export function normalizeExtensionPath(rawPath: string): {
+  readonly relativePath: string;
+  readonly repoPath: string;
+} | null {
+  const trimmed = rawPath
+    .trim()
+    .replace(/^\.\//, "")
+    .replace(/^extension\//, "");
+  if (!trimmed || trimmed.startsWith("/") || trimmed.includes("\\")) {
+    return null;
+  }
+  const segments = trimmed.split("/");
+  if (segments.some((seg) => !SEGMENT_PATTERN.test(seg) || seg === "..")) {
+    return null;
+  }
+  const [first, ...rest] = segments;
+  if (!first) {
+    return null;
+  }
+  if (rest.length === 0) {
+    if (!ALLOWED_ROOT_FILES.has(first)) {
+      return null;
+    }
+  } else if (!ALLOWED_ROOT_DIRS.has(first)) {
+    return null;
+  }
+  return {
+    relativePath: trimmed,
+    repoPath: `${EXTENSION_ROOT}/${trimmed}`,
+  };
+}
 
 function stripTokenExpiry(token: string): string {
   return token.split("?expires=")[0] ?? token;
@@ -44,7 +82,7 @@ async function openOrCreateRepo(
     }
   }
   await artifacts.create(repoName, {
-    description: "Personal agent self-authored extensions",
+    description: "Personal agent self-authored extension workspace",
     readOnly: false,
     setDefaultBranch: DEFAULT_BRANCH,
   });
@@ -113,11 +151,28 @@ export async function mutateRepo(
   }
 }
 
-export async function listSavedExtensions(
+async function walkTreeFiles(
+  handle: ArtifactsRepo,
+  treeHash: string,
+  prefix: string,
+  out: string[],
+): Promise<void> {
+  const entries = (await handle.readTree(treeHash)) ?? [];
+  for (const entry of entries) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.type === "tree") {
+      await walkTreeFiles(handle, entry.hash, rel, out);
+    } else if (entry.type === "blob") {
+      out.push(rel);
+    }
+  }
+}
+
+export async function listExtensionFiles(
   artifacts: Artifacts,
   repoName: string,
 ): Promise<{
-  readonly extensions: readonly ExtensionManifest[];
+  readonly files: readonly string[];
   readonly recentCommits: readonly {
     readonly hash: string;
     readonly message: string;
@@ -129,72 +184,39 @@ export async function listSavedExtensions(
     repo = await artifacts.get(repoName);
   } catch (thrown) {
     if (isArtifactsNotFound(thrown)) {
-      return { extensions: [], recentCommits: [] };
+      return { files: [], recentCommits: [] };
     }
     throw thrown;
   }
   using handle = repo;
   const commits = await handle.log({ ref: DEFAULT_BRANCH, limit: 10 });
+  const recentCommits = commits.map((c) => ({
+    hash: c.hash,
+    message: c.message,
+    authoredAt: c.authoredAt,
+  }));
   const head = commits[0];
   if (!head) {
-    return { extensions: [], recentCommits: [] };
+    return { files: [], recentCommits };
   }
   const rootEntries = await handle.readTree(head.treeHash);
-  const extensionsDir = rootEntries?.find(
-    (entry) => entry.name === "extensions" && entry.type === "tree",
+  const extDir = rootEntries?.find(
+    (entry) => entry.name === EXTENSION_ROOT && entry.type === "tree",
   );
-  if (!extensionsDir) {
-    return {
-      extensions: [],
-      recentCommits: commits.map((c) => ({
-        hash: c.hash,
-        message: c.message,
-        authoredAt: c.authoredAt,
-      })),
-    };
+  if (!extDir) {
+    return { files: [], recentCommits };
   }
-  const childDirs = (await handle.readTree(extensionsDir.hash)) ?? [];
-  const manifests: ExtensionManifest[] = [];
-  for (const child of childDirs) {
-    if (child.type !== "tree") {
-      continue;
-    }
-    const blob = await handle.readFile({
-      ref: DEFAULT_BRANCH,
-      path: `extensions/${child.name}/manifest.json`,
-    });
-    if (!blob) {
-      continue;
-    }
-    try {
-      const parsed = ExtensionManifestSchema.safeParse(
-        JSON.parse(await blob.text()),
-      );
-      if (parsed.success) {
-        manifests.push(parsed.data);
-      }
-    } catch {
-      continue;
-    }
-  }
-  return {
-    extensions: manifests,
-    recentCommits: commits.map((c) => ({
-      hash: c.hash,
-      message: c.message,
-      authoredAt: c.authoredAt,
-    })),
-  };
+  const files: string[] = [];
+  await walkTreeFiles(handle, extDir.hash, "", files);
+  files.sort();
+  return { files, recentCommits };
 }
 
-export async function readSavedExtension(
+export async function readExtensionFile(
   artifacts: Artifacts,
   repoName: string,
-  name: string,
-): Promise<{
-  readonly code: string;
-  readonly manifest: ExtensionManifest | null;
-} | null> {
+  repoPath: string,
+): Promise<string | null> {
   let repo: ArtifactsRepo;
   try {
     repo = await artifacts.get(repoName);
@@ -205,32 +227,43 @@ export async function readSavedExtension(
     throw thrown;
   }
   using handle = repo;
-  const codeBlob = await handle.readFile({
+  const blob = await handle.readFile({
     ref: DEFAULT_BRANCH,
-    path: `extensions/${name}/index.js`,
+    path: repoPath,
   });
-  if (!codeBlob) {
-    return null;
+  return blob ? blob.text() : null;
+}
+
+export async function readExtensionModules(
+  artifacts: Artifacts,
+  repoName: string,
+): Promise<ReadonlyMap<string, string>> {
+  const { files } = await listExtensionFiles(artifacts, repoName);
+  const modules = new Map<string, string>();
+  if (files.length === 0) {
+    return modules;
   }
-  const manifestBlob = await handle.readFile({
-    ref: DEFAULT_BRANCH,
-    path: `extensions/${name}/manifest.json`,
-  });
-  let manifest: ExtensionManifest | null = null;
-  if (manifestBlob) {
-    try {
-      const parsed = ExtensionManifestSchema.safeParse(
-        JSON.parse(await manifestBlob.text()),
-      );
-      if (parsed.success) {
-        manifest = parsed.data;
-      }
-    } catch {
-      manifest = null;
+  let repo: ArtifactsRepo;
+  try {
+    repo = await artifacts.get(repoName);
+  } catch (thrown) {
+    if (isArtifactsNotFound(thrown)) {
+      return modules;
+    }
+    throw thrown;
+  }
+  using handle = repo;
+  for (const relativePath of files) {
+    if (!EXECUTABLE_MODULE_EXT.test(relativePath)) {
+      continue;
+    }
+    const blob = await handle.readFile({
+      ref: DEFAULT_BRANCH,
+      path: `${EXTENSION_ROOT}/${relativePath}`,
+    });
+    if (blob) {
+      modules.set(relativePath, await blob.text());
     }
   }
-  return {
-    code: await codeBlob.text(),
-    manifest,
-  };
+  return modules;
 }

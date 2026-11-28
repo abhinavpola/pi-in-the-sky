@@ -36,7 +36,7 @@ const SYSTEM_PREAMBLE = [
   "Use load_skill when a relevant bundled playbook exists.",
   "Ask the user in chat for permission whenever an action is irreversible, involves spending money, or sends external communications.",
   "If a website requires sign-in, CAPTCHA, or MFA, call browser_request_takeover so the user can complete it in Live View.",
-  "When you need a reusable custom tool or computation, author it with extension_save (stored in Cloudflare Artifacts) and execute it in a sandboxed Dynamic Worker via extension_run.",
+  "When you need a reusable custom feature, tool, skill, or stateful handler, write TypeScript/Markdown files into your extension/ workspace via extension_write_file (Cloudflare Artifacts) and execute them in a Dynamic Worker (or Durable Object facet for persistent per-feature SQLite state) via extension_run.",
 ].join("\n");
 
 function timingSafeEqualText(a: string, b: string): boolean {
@@ -288,6 +288,7 @@ export class PersonalAgent extends DurableObject<Env> {
       createExtensionsExtension(
         () => this.env.ARTIFACTS,
         () => this.env.LOADER,
+        () => this.ctx.facets,
         this.ctx.id.toString(),
       ),
     );

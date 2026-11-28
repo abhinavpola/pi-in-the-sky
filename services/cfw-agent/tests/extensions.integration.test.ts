@@ -55,19 +55,62 @@ function nextSocketMessage(
   });
 }
 
-const EXTENSION_CODE = `
+const LIB_MATH_TS = `
+export function sumNumbers(values: readonly number[]): number {
+  return values.reduce((acc, n) => acc + n, 0);
+}
+`.trim();
+
+const TOOL_SUM_TS = `
+import { sumNumbers } from "../lib/math.ts";
+
+interface SumInput {
+  numbers?: number[];
+}
+
 export default {
-  async fetch(request) {
-    const { input } = await request.json();
-    const values = Array.isArray(input?.numbers) ? input.numbers : [];
-    const sum = values.reduce((acc, n) => acc + Number(n), 0);
-    return Response.json({ sum, count: values.length });
+  async fetch(request: Request): Promise<Response> {
+    const body = (await request.json()) as { input?: SumInput };
+    const values = Array.isArray(body.input?.numbers) ? body.input.numbers : [];
+    return Response.json({
+      sum: sumNumbers(values),
+      count: values.length,
+    });
   },
 };
 `.trim();
 
-describe("cfw-agent Cloudflare Artifacts + Dynamic Worker Loaders integration", () => {
-  it("saves an extension to Artifacts, lists and reads it, executes it in a sandboxed Dynamic Worker, and deletes it", async () => {
+const FACET_V1_TS = `
+import { DurableObject } from "cloudflare:workers";
+
+export class InboxCursorFacet extends DurableObject {
+  constructor(ctx: DurableObjectState, env: unknown) {
+    super(ctx, env);
+    ctx.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS cursor_state (id INTEGER PRIMARY KEY, cursor INTEGER NOT NULL)",
+    );
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const body = (await request.json()) as { input?: { delta?: number } };
+    const delta = Number(body.input?.delta ?? 1);
+    const row = this.ctx.storage.sql
+      .exec<{ cursor: number }>("SELECT cursor FROM cursor_state WHERE id = 1")
+      .toArray()[0];
+    const next = (row?.cursor ?? 0) + delta;
+    this.ctx.storage.sql.exec(
+      "INSERT INTO cursor_state (id, cursor) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET cursor = excluded.cursor",
+      next,
+    );
+    return Response.json({ version: "v1", cursor: next });
+  }
+}
+`.trim();
+
+const FACET_V2_TS = FACET_V1_TS.replace('version: "v1"', 'version: "v2"');
+
+describe("cfw-agent extension/ workspace (Artifacts + Dynamic Workers + DO Facets)", () => {
+  it("writes TS modules under extension/, runs cross-module Dynamic Workers, persists state in DO Facets across code updates, and deletes files", async () => {
     const stub: DurableObjectStub<TestPersonalAgent> =
       env.PersonalAgent.getByName("personal");
 
@@ -75,13 +118,39 @@ describe("cfw-agent Cloudflare Artifacts + Dynamic Worker Loaders integration", 
       {
         toolCalls: [
           {
-            id: "tc-save",
-            name: "extension_save",
+            id: "tc-write-lib",
+            name: "extension_write_file",
             arguments: {
-              name: "sum-numbers",
-              description: "Sums an array of numbers inside a Dynamic Worker.",
-              code: EXTENSION_CODE,
-              commitMessage: "Add sum-numbers extension",
+              path: "lib/math.ts",
+              content: LIB_MATH_TS,
+              commitMessage: "Add extension/lib/math.ts",
+            },
+          },
+          {
+            id: "tc-write-tool",
+            name: "extension_write_file",
+            arguments: {
+              path: "tools/sum.ts",
+              content: TOOL_SUM_TS,
+              commitMessage: "Add extension/tools/sum.ts",
+            },
+          },
+          {
+            id: "tc-write-skill",
+            name: "extension_write_file",
+            arguments: {
+              path: "skills/triage/SKILL.md",
+              content: "# Triage Skill\nSort incoming items by urgency.\n",
+              commitMessage: "Add triage skill",
+            },
+          },
+          {
+            id: "tc-write-facet-v1",
+            name: "extension_write_file",
+            arguments: {
+              path: "extension.ts",
+              content: FACET_V1_TS,
+              commitMessage: "Add InboxCursorFacet v1",
             },
           },
         ],
@@ -90,20 +159,30 @@ describe("cfw-agent Cloudflare Artifacts + Dynamic Worker Loaders integration", 
         toolCalls: [
           {
             id: "tc-list",
-            name: "extension_list",
+            name: "extension_list_files",
             arguments: {},
           },
           {
             id: "tc-read",
-            name: "extension_read",
-            arguments: { name: "sum-numbers" },
+            name: "extension_read_file",
+            arguments: { path: "skills/triage/SKILL.md" },
           },
           {
-            id: "tc-run",
+            id: "tc-run-sum",
             name: "extension_run",
             arguments: {
-              name: "sum-numbers",
+              path: "tools/sum.ts",
               input: { numbers: [10, 20, 12] },
+            },
+          },
+          {
+            id: "tc-facet-1",
+            name: "extension_run",
+            arguments: {
+              path: "extension.ts",
+              facet: "inbox",
+              className: "InboxCursorFacet",
+              input: { delta: 1 },
             },
           },
         ],
@@ -111,17 +190,54 @@ describe("cfw-agent Cloudflare Artifacts + Dynamic Worker Loaders integration", 
       {
         toolCalls: [
           {
-            id: "tc-delete",
-            name: "extension_delete",
+            id: "tc-facet-2",
+            name: "extension_run",
             arguments: {
-              name: "sum-numbers",
-              commitMessage: "Remove sum-numbers extension",
+              path: "extension.ts",
+              facet: "inbox",
+              className: "InboxCursorFacet",
+              input: { delta: 1 },
             },
           },
         ],
       },
       {
-        text: "Saved, ran (sum=42), and deleted sum-numbers.",
+        toolCalls: [
+          {
+            id: "tc-write-facet-v2",
+            name: "extension_write_file",
+            arguments: {
+              path: "extension.ts",
+              content: FACET_V2_TS,
+              commitMessage: "Upgrade InboxCursorFacet to v2",
+            },
+          },
+        ],
+      },
+      {
+        toolCalls: [
+          {
+            id: "tc-facet-3",
+            name: "extension_run",
+            arguments: {
+              path: "extension.ts",
+              facet: "inbox",
+              className: "InboxCursorFacet",
+              input: { delta: 1 },
+            },
+          },
+          {
+            id: "tc-delete-tool",
+            name: "extension_delete_file",
+            arguments: {
+              path: "tools/sum.ts",
+              commitMessage: "Remove temporary sum tool",
+            },
+          },
+        ],
+      },
+      {
+        text: "Workspace verified: sum=42 and inbox facet v2 cursor=3.",
       },
     ]);
 
@@ -144,24 +260,28 @@ describe("cfw-agent Cloudflare Artifacts + Dynamic Worker Loaders integration", 
     const doneView = nextSocketMessage(
       ws,
       (m) =>
-        m.type === "view" && JSON.stringify(m.view ?? null).includes("sum=42"),
-      "final view with sum=42",
-      15_000,
+        m.type === "view" &&
+        JSON.stringify(m.view ?? null).includes("cursor=3"),
+      "final view with cursor=3",
+      20_000,
     );
 
     ws.send(
       JSON.stringify({
         type: "submit",
         id: "cmd-submit-ext",
-        input: "Write and run a sum-numbers extension for [10, 20, 12].",
+        input: "Set up extension/ tools, skills, and stateful inbox facet.",
       }),
     );
 
     const finalMsg = await doneView;
     const serialized = JSON.stringify(finalMsg.view ?? null);
-    expect(serialized).toContain("sum-numbers");
+    expect(serialized).toContain("skills/triage/SKILL.md");
     expect(serialized).toContain('\\"sum\\":42');
     expect(serialized).toContain('\\"count\\":3');
+    expect(serialized).toContain('\\"version\\":\\"v1\\",\\"cursor\\":1');
+    expect(serialized).toContain('\\"version\\":\\"v1\\",\\"cursor\\":2');
+    expect(serialized).toContain('\\"version\\":\\"v2\\",\\"cursor\\":3');
     expect(serialized).not.toContain('"isError":true');
 
     ws.close();

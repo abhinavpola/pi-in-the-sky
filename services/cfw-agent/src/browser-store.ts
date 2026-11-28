@@ -52,6 +52,7 @@ async function sha256Hex(value: string): Promise<string> {
 export class BrowserStore {
   readonly #sql: SqlStorage;
   readonly #takeoverTokens = new Map<string, TakeoverTokenEntry>();
+  readonly #waitingTakeovers = new Map<string, number>();
 
   constructor(sql: SqlStorage) {
     this.#sql = sql;
@@ -75,6 +76,14 @@ export class BrowserStore {
         value TEXT NOT NULL
       );
     `);
+    const waitingRows = this.#sql
+      .exec<{ id: string; conversation_id: number }>(
+        "SELECT id, conversation_id FROM browser_takeovers WHERE status = 'waiting'",
+      )
+      .toArray();
+    for (const row of waitingRows) {
+      this.#waitingTakeovers.set(row.id, row.conversation_id);
+    }
   }
 
   getSessionId(conversationId: string): string | undefined {
@@ -156,6 +165,7 @@ export class BrowserStore {
     if (!created) {
       throw new Error(`Failed to persist browser takeover ${input.id}`);
     }
+    this.#waitingTakeovers.set(input.id, input.conversationId);
     return created;
   }
 
@@ -185,15 +195,12 @@ export class BrowserStore {
   }
 
   hasWaitingTakeover(conversationId: number): boolean {
-    const now = Date.now();
-    const row = this.#sql
-      .exec<{ count: number }>(
-        "SELECT COUNT(*) as count FROM browser_takeovers WHERE status = 'waiting' AND conversation_id = ? AND (expires_at = 0 OR expires_at > ?)",
-        conversationId,
-        now,
-      )
-      .toArray()[0];
-    return (row?.count ?? 0) > 0;
+    for (const waitingConversationId of this.#waitingTakeovers.values()) {
+      if (waitingConversationId === conversationId) {
+        return true;
+      }
+    }
+    return false;
   }
 
   listWaitingTakeovers(): BrowserTakeoverRecord[] {
@@ -208,6 +215,7 @@ export class BrowserStore {
   }
 
   markResumed(id: string): void {
+    this.#waitingTakeovers.delete(id);
     this.#sql.exec(
       "UPDATE browser_takeovers SET status = 'resumed' WHERE id = ?",
       id,
@@ -216,18 +224,31 @@ export class BrowserStore {
   }
 
   clearWaitingTakeovers(conversationId: number): void {
+    const ids = new Set<string>();
+    for (const [
+      id,
+      waitingConversationId,
+    ] of this.#waitingTakeovers.entries()) {
+      if (waitingConversationId === conversationId) {
+        ids.add(id);
+        this.#waitingTakeovers.delete(id);
+      }
+    }
     const rows = this.#sql
       .exec<{ id: string }>(
         "SELECT id FROM browser_takeovers WHERE status = 'waiting' AND conversation_id = ?",
         conversationId,
       )
       .toArray();
+    for (const row of rows) {
+      ids.add(row.id);
+    }
     this.#sql.exec(
       "UPDATE browser_takeovers SET status = 'resumed' WHERE status = 'waiting' AND conversation_id = ?",
       conversationId,
     );
-    for (const row of rows) {
-      this.revokeTakeoverTokens(row.id);
+    for (const id of ids) {
+      this.revokeTakeoverTokens(id);
     }
   }
 }

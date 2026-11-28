@@ -141,16 +141,24 @@ export class PersonalAgent extends DurableObject<Env> {
   readonly schedules: PersonalScheduler = new Scheduler({
     callbacks: {
       runPrompt: async (payload: SchedulePromptPayload) => {
-        const id = `act-${crypto.randomUUID().slice(0, 8)}`;
-        const sessionId = `scheduled-${id}`;
+        const childSession = await this.harness.sessions.create();
+        const id = `act-${childSession.id}`;
         const record = this.activities.createActivity({
           id,
           title: payload.title,
-          sessionId,
+          sessionId: childSession.id,
           summary: payload.prompt.slice(0, 160),
         });
         this.sockets.broadcastActivity(record);
-        await this.harness.session(sessionId).submit(payload.prompt);
+        await childSession.submit(
+          [
+            `Activity ID: ${id}`,
+            `Title: ${payload.title}`,
+            `Task: ${payload.prompt}`,
+            `When finished, call activity_complete with activityId "${id}" and a concise summary of the result.`,
+          ].join("\n"),
+          { operationId: `spawn-${id}` },
+        );
       },
       runModule: async (payload: ScheduleModulePayload) => {
         await this.extensionsRuntime.runModule({

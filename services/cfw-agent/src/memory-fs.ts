@@ -143,7 +143,13 @@ export class MemoryFS {
       }
       await this.mkdir(parentPath, { recursive: true });
     }
-    if (this.#entries.has(target)) {
+    const existingTarget = this.#entries.get(target);
+    if (existingTarget) {
+      if (existingTarget.kind !== "dir") {
+        const error = new Error(`ENOTDIR: ${target}`);
+        Object.assign(error, { code: "ENOTDIR" });
+        throw error;
+      }
       return;
     }
     this.#entries.set(target, {
@@ -159,6 +165,12 @@ export class MemoryFS {
     data: string | Uint8Array | ArrayBuffer,
   ): Promise<void> {
     const target = this.#normalize(path);
+    const existing = this.#entries.get(target);
+    if (existing?.kind === "dir") {
+      const error = new Error(`EISDIR: ${path}`);
+      Object.assign(error, { code: "EISDIR" });
+      throw error;
+    }
     const parentPath = this.#parent(target);
     await this.mkdir(parentPath, { recursive: true });
     const bytes =

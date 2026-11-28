@@ -1,3 +1,5 @@
+import { posix } from "node:path";
+
 type MemoryEntry =
   | {
       readonly kind: "dir";
@@ -74,32 +76,15 @@ export class MemoryFS {
   };
 
   #normalize(input: string): string {
-    const segments: string[] = [];
-    for (const part of input.split("/")) {
-      if (!part || part === ".") {
-        continue;
-      }
-      if (part === "..") {
-        segments.pop();
-        continue;
-      }
-      segments.push(part);
-    }
-    return segments.length > 0 ? `/${segments.join("/")}` : "/";
+    return posix.resolve("/", input);
   }
 
-  #parent(path: string): string {
-    const normalized = this.#normalize(path);
-    if (normalized === "/") {
-      return "/";
-    }
-    const parts = normalized.split("/").filter(Boolean);
-    parts.pop();
-    return parts.length > 0 ? `/${parts.join("/")}` : "/";
+  #parent(input: string): string {
+    return posix.dirname(this.#normalize(input));
   }
 
-  #basename(path: string): string {
-    return this.#normalize(path).split("/").filter(Boolean).pop() ?? "";
+  #basename(input: string): string {
+    return posix.basename(this.#normalize(input));
   }
 
   #requireEntry(path: string): MemoryEntry {

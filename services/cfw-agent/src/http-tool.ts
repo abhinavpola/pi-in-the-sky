@@ -23,11 +23,23 @@ export async function fetchJsonWithBearer(
     headers.set("Content-Type", "application/json");
   }
   try {
-    const response = await fetcher(url, { ...options.init, headers });
+    const response = await fetcher(url, {
+      ...options.init,
+      headers,
+      redirect: "manual",
+    });
+    const prefix = options.errorPrefix ? `${options.errorPrefix} ` : "";
+    if (response.status >= 300 && response.status < 400) {
+      return err(`${prefix}Unexpected redirect (HTTP ${response.status}).`);
+    }
     const text = await response.text();
     if (!response.ok) {
-      const prefix = options.errorPrefix ? `${options.errorPrefix} ` : "";
-      return err(`${prefix}HTTP ${response.status}: ${text}`);
+      const summary = text.replace(/\s+/g, " ").trim().slice(0, 200);
+      return err(
+        summary
+          ? `${prefix}HTTP ${response.status}: ${summary}`
+          : `${prefix}HTTP ${response.status}`,
+      );
     }
     const parsed: unknown = text ? JSON.parse(text) : {};
     return ok(parsed);

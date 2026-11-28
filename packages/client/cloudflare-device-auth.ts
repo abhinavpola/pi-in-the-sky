@@ -24,6 +24,7 @@ const DeviceAuthResponseSchema = z.object({
 
 const DeviceTokenSuccessSchema = z.object({
   access_token: z.string().min(1),
+  expires_in: z.number().positive().optional(),
 });
 
 const DeviceTokenErrorSchema = z.object({
@@ -96,7 +97,11 @@ type DeviceAuthStartResult =
   | { readonly ok: false; readonly error: string };
 
 type DeviceTokenPollResult =
-  | { readonly ok: true; readonly accessToken: string }
+  | {
+      readonly ok: true;
+      readonly accessToken: string;
+      readonly expiresAt: number | null;
+    }
   | { readonly ok: false; readonly error: string };
 
 export function encodeFormBody(entries: Record<string, string>): string {
@@ -300,7 +305,14 @@ export async function pollCloudflareDeviceToken(
             error: "Unexpected token response from Cloudflare.",
           };
         }
-        return { ok: true, accessToken: parsed.data.access_token };
+        return {
+          ok: true,
+          accessToken: parsed.data.access_token,
+          expiresAt:
+            parsed.data.expires_in !== undefined
+              ? Date.now() + parsed.data.expires_in * 1000
+              : null,
+        };
       }
       const errParsed = DeviceTokenErrorSchema.safeParse(payload);
       if (errParsed.success) {

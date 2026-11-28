@@ -1,4 +1,7 @@
-import { LOCAL_DEV_AUTH_TOKEN } from "@pi-in-the-sky/client/protocol";
+import {
+  LOCAL_DEV_AUTH_TOKEN,
+  TakeoverRecordSchema,
+} from "@pi-in-the-sky/client/protocol";
 import { env, SELF } from "cloudflare:test";
 import { SignJWT } from "jose";
 import { describe, expect, it } from "vitest";
@@ -16,12 +19,7 @@ const SocketMessageSchema = z
     type: z.string(),
     id: z.string().optional(),
     result: z.unknown().optional(),
-    takeover: z
-      .object({
-        id: z.string(),
-        liveViewUrl: z.string().nullable(),
-      })
-      .optional(),
+    takeover: TakeoverRecordSchema.optional(),
   })
   .passthrough();
 
@@ -401,12 +399,21 @@ describe("cfw-agent workerd integration", () => {
       {
         toolCalls: [
           {
+            id: "tc-nav-airline",
+            name: "browser_navigate",
+            arguments: {
+              url: "https://airline.example/login",
+            },
+          },
+        ],
+      },
+      {
+        toolCalls: [
+          {
             id: "tc-takeover",
             name: "browser_request_takeover",
             arguments: {
-              url: "https://airline.example/login",
               reason: "MFA verification required to continue checkout.",
-              liveViewUrl: "https://live.browser.test/session/abc",
             },
           },
         ],
@@ -436,8 +443,12 @@ describe("cfw-agent workerd integration", () => {
     );
 
     const takeoverMsg = await takeoverPromise;
-    expect(takeoverMsg.takeover?.liveViewUrl).toBe(
-      "https://live.browser.test/session/abc",
+    expect(takeoverMsg.takeover?.url).toBe("https://airline.example/login");
+    expect(takeoverMsg.takeover?.hostname).toBe("airline.example");
+    expect(takeoverMsg.takeover?.origin).toBe("https://airline.example");
+    expect(takeoverMsg.takeover?.expiresAt).toBeGreaterThan(Date.now());
+    expect(takeoverMsg.takeover?.liveViewUrl).toMatch(
+      /^https:\/\/live\.browser\.test\/takeover\/[A-Za-z0-9_-]+$/,
     );
 
     const takeoverId = takeoverMsg.takeover?.id;

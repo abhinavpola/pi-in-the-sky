@@ -13,11 +13,12 @@ import { verifyCloudflareAccessJwt } from "./access-auth";
 import { ActivityStore, createActivitiesExtension } from "./activities";
 import {
   type BrowserExecutor,
-  BrowserStore,
   BrowserTakeoverSignal,
   createBrowserExtension,
   createPuppeteerBrowserExecutor,
+  type LiveViewUrlResolver,
 } from "./browser";
+import { BrowserStore } from "./browser-store";
 import { ConnectorBridge } from "./connector-bridge";
 import { createConnectorsExtension } from "./connectors";
 import { createExtensionsRuntime } from "./extensions";
@@ -169,7 +170,7 @@ export class PersonalAgent extends DurableObject<Env> {
         });
         if (!result.ok) {
           throw new Error(
-            `Scheduled module "${payload.path}" failed (${result.status}): ${JSON.stringify(result.output)}`,
+            `Scheduled module "${payload.path}" failed (HTTP ${result.status}).`,
           );
         }
       },
@@ -215,6 +216,10 @@ export class PersonalAgent extends DurableObject<Env> {
     return createPuppeteerBrowserExecutor(() => this.env.BROWSER, this.browser);
   }
 
+  protected createLiveViewUrlResolver(): LiveViewUrlResolver {
+    return () => null;
+  }
+
   #installExtensions(): void {
     if (this.#extensionsInstalled) {
       return;
@@ -248,6 +253,7 @@ export class PersonalAgent extends DurableObject<Env> {
         (record) => {
           this.sockets.broadcastTakeover(record);
         },
+        this.createLiveViewUrlResolver(),
       ),
     );
     this.registry.install(this.extensionsRuntime.extension);
